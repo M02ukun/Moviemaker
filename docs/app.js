@@ -646,7 +646,7 @@ function setupZoom() {
 const dur = () => S.duration || (isFinite(v.duration) ? v.duration : 0);
 // While a finger is dragging we never stack seeks: at most one waits until the previous one lands.
 const SK = { pending: null };
-function seekSoft(t) { t = clamp(t, 0, dur()); S.shown = t; if (v.seeking) SK.pending = t; else v.currentTime = t; refreshPlayhead(); }
+function seekSoft(t, quiet) { t = clamp(t, 0, dur()); if (!quiet) crossBuzz(curT(), t); S.shown = t; if (v.seeking) SK.pending = t; else v.currentTime = t; refreshPlayhead(); }
 v.addEventListener('seeked', () => { if (SK.pending != null) { const t = SK.pending; SK.pending = null; v.currentTime = t; } });
 function seek(t) { SK.pending = null; S.shown = null; v.currentTime = clamp(t, 0, dur()); refreshPlayhead(); }
 function curT() { return S.shown != null ? S.shown : (v.currentTime || 0); }
@@ -679,6 +679,32 @@ function hideBubble(ms = 0) { clearTimeout(bubbleT); bubbleT = setTimeout(() => 
 const PREC = [{ f: 1, label: '' }, { f: 0.25, label: '1/4 の速さ' }, { f: 0.06, label: '微調整' }];
 const precLevel = dy => { const a = Math.abs(dy); return a < 45 ? 0 : a < 100 ? 1 : 2; };
 
+/* snapping + haptics: handles cling to sentence starts/ends, silences and section boundaries */
+const SNAP = { on: true };
+try { SNAP.on = localStorage.getItem('kirinuki:snap') !== '0'; } catch (_) {}
+function buzz(ms) { if (!SNAP.on) return; try { navigator.vibrate && navigator.vibrate(ms); } catch (_) {} }
+function renderSnapBtn() { const b = $('#b-snap'); b.setAttribute('aria-pressed', String(SNAP.on)); b.textContent = '吸着 ' + (SNAP.on ? 'ON' : 'OFF'); }
+$('#b-snap').onclick = () => {
+  SNAP.on = !SNAP.on; try { localStorage.setItem('kirinuki:snap', SNAP.on ? '1' : '0'); } catch (_) {}
+  renderSnapBtn(); toast(SNAP.on ? 'つまみが文の切れ目や無音に吸い付き、区間の境目で振動します' : '吸着と振動をオフにしました');
+};
+renderSnapBtn();
+function snapTargets(kind, around, win) {
+  const out = [], isIn = kind === 'in', near = t => Math.abs(t - around) <= win;
+  for (const l of S.tr.lines) { const t = isIn ? Math.max(0, l.s - 0.15) : l.e + 0.15; if (near(t)) out.push({ t, why: isIn ? '文の頭' : '文の終わり', rank: 0 }); }
+  if (S.feat) for (const p of S.feat.pauses) { const t = isIn ? Math.max(p.s, p.e - 0.25) : Math.min(p.e, p.s + 0.2); if (near(t)) out.push({ t, why: '無音', rank: 1 }); }
+  for (const s of S.segs) if (s.start > 0 && near(s.start)) out.push({ t: s.start, why: '区間の境目', rank: 0 });
+  return out;
+}
+function nearestSnap(list, t, tol) {
+  if (!SNAP.on || !list) return null;
+  let best = null, bd = tol;
+  for (const x of list) { const d = Math.abs(x.t - t) + x.rank * tol * 0.25; if (d < bd) { bd = d; best = x; } }
+  return best;
+}
+// a small "thump" when the playhead crosses a section boundary (like YouTube chapters)
+function crossBuzz(a, b) { if (a === b) return; const lo = Math.min(a, b), hi = Math.max(a, b); for (const s of S.segs) if (s.start > 0 && s.start > lo && s.start <= hi) { buzz(12); return; } }
+
 /* custom seek bar: grab anywhere and slide (no jump on tap) */
 const bar = $('#seekbar');
 function updateBar() { const d = dur(), p = d ? clamp(curT() / d, 0, 1) : 0; bar.querySelector('.fill').style.width = (p * 100) + '%'; bar.querySelector('.knob').style.left = (p * 100) + '%'; bar.setAttribute('aria-valuenow', String(Math.round(curT()))); bar.setAttribute('aria-valuetext', fmt(curT())); }
@@ -700,11 +726,22 @@ bar.addEventListener('keydown', e => { if (e.key === 'ArrowLeft') { e.preventDef
 /* gestures on the video: slide to seek, double-tap the sides for ±5 s, tap to play/pause */
 const gest = $('#gest');
 let gd = null, lastTap = { time: 0, side: '', count: 0 }, tapTimer = 0;
-gest.addEventListener('pointerdown', e => { if (!S.file) return; gd = { id: e.pointerId, x: e.clientX, y: e.clientY, lastX: e.clientX, t0: curT(), t: curT(), wasPlaying: !v.paused, mode: '' }; });
+gest.addEventListener('pointerdown', e => {
+  if (!S.file) return;
+  const g = gd = { id: e.pointerId, x: e.clientX, y: e.clientY, lastX: e.clientX, t0: curT(), t: curT(), wasPlaying: !v.paused, mode: '' };
+  // hold still for a moment: play at 2x until the finger lifts
+  g.lpTimer = setTimeout(() => {
+    if (gd !== g || g.mode) return;
+    g.mode = 'fast'; g.wasPaused = v.paused; clearTimeout(tapTimer);
+    v.playbackRate = 2; if (v.paused) v.play().catch(() => {});
+    showBubble('2倍速', '指を離すと元に戻ります'); buzz(10);
+  }, 450);
+});
 gest.addEventListener('pointermove', e => {
   if (!gd || e.pointerId !== gd.id) return;
   const dx = e.clientX - gd.x, dy = e.clientY - gd.y;
   if (!gd.mode) {
+    if (Math.abs(dx) > 8 || Math.abs(dy) > 8) clearTimeout(gd.lpTimer);
     if (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy)) { gd.mode = 'seek'; try { gest.setPointerCapture(gd.id); } catch (_) {} v.pause(); clearTimeout(tapTimer); }
     else { if (Math.abs(dy) > 12) gd.mode = 'other'; return; }
   }
@@ -723,7 +760,8 @@ function jumpTap(side, count) {
 }
 const endGest = e => {
   if (!gd || e.pointerId !== gd.id) return;
-  const g = gd; gd = null;
+  const g = gd; gd = null; clearTimeout(g.lpTimer);
+  if (g.mode === 'fast') { v.playbackRate = 1; if (g.wasPaused) v.pause(); hideBubble(200); lastTap = { time: 0, side: '', count: 0 }; return; }
   if (g.mode === 'seek') { seek(g.t); hideBubble(600); if (g.wasPlaying) v.play().catch(() => {}); return; }
   if (g.mode || e.type === 'pointercancel') return;
   const r = gest.getBoundingClientRect(), fx = (e.clientX - r.left) / r.width, side = fx < 0.34 ? 'l' : fx > 0.66 ? 'r' : 'c', now = performance.now();
@@ -814,6 +852,10 @@ function drawStripNow() {
       const h = Math.max(1, m * wH); g.fillRect(px, wTop + 2 + wH - h, 1, h);
     }
   }
+  if (S.tr.lines.length && span <= 120) {
+    g.fillStyle = COL.muted;
+    for (const l of S.tr.lines) { const x = X(l.s); if (x < -4 || x > W + 4) continue; g.beginPath(); g.moveTo(x - 3, wTop); g.lineTo(x + 3, wTop); g.lineTo(x, wTop + 4); g.fill(); }
+  }
   g.fillStyle = COL.cut; for (const s of S.segs) { if (!s.start) continue; const x = X(s.start); if (x >= 0 && x <= W) g.fillRect(Math.round(x), top, 1.5, H - top); }
   for (const cl of S.clips) {
     const a = X(cl.start), b = X(cl.end); if (b < -12 || a > W + 12) continue;
@@ -823,6 +865,7 @@ function drawStripNow() {
     g.fillRect(a, top, hw, H - top); g.fillRect(b - hw, top, hw, H - top);
     if (sel) { g.fillStyle = COL['tape-ink']; for (const gx of [a + hw / 2, b - hw / 2]) for (let i = -1; i <= 1; i++) g.fillRect(gx - 1, (top + H) / 2 + i * 6 - 1, 2, 2); }
   }
+  if (sd && sd.mode === 'handle' && sd.snap) { const x = Math.round(X(sd.snap.t)); g.fillStyle = COL.cut; g.fillRect(x - 1, 0, 2, H); }
   const px = Math.round(X(curT()));
   g.fillStyle = COL.fg; g.fillRect(px - 1, top - 3, 2, H - top + 3);
   g.beginPath(); g.moveTo(px - 5, top - 7); g.lineTo(px + 5, top - 7); g.lineTo(px, top - 1); g.fill();
@@ -858,7 +901,11 @@ strip.addEventListener('pointerdown', e => {
   let hit = null, hd = 22;
   for (const cl of S.clips) for (const kind of ['in', 'out']) { const hx = X(kind === 'in' ? cl.start : cl.end) + (kind === 'in' ? 4 : -4); const dd = Math.abs(hx - x) - (cl.id === S.editId ? 8 : 0); if (dd < hd) { hd = dd; hit = { cl, kind }; } }
   sd = { mode: hit ? 'handle' : 'scrub', hit, x: e.clientX, y: e.clientY, lastX: e.clientX, t: curT(), wasPlaying: !v.paused, moved: false };
-  if (hit) { FS.lockV0 = v0; if (S.editId !== hit.cl.id) { S.editId = hit.cl.id; renderClips(); } }
+  if (hit) {
+    FS.lockV0 = v0; sd.raw = hit.kind === 'in' ? hit.cl.start : hit.cl.end; sd.snap = null;
+    sd.targets = snapTargets(hit.kind, sd.raw, Math.max(FS.span, 30));
+    if (S.editId !== hit.cl.id) { S.editId = hit.cl.id; renderClips(); }
+  }
   v.pause();
 });
 strip.addEventListener('pointermove', e => {
@@ -877,10 +924,16 @@ strip.addEventListener('pointermove', e => {
   const lv = precLevel(e.clientY - sd.y), spp = FS.span / strip.clientWidth * PREC[lv].f;
   if (sd.mode === 'scrub') { sd.t = clamp(sd.t - dx * spp, 0, dur()); seekSoft(sd.t); if (lv) showBubble(fmtP(sd.t), PREC[lv].label); }
   else {
-    const cl = sd.hit.cl;
-    if (sd.hit.kind === 'in') { cl.start = clamp(cl.start + dx * spp, 0, cl.end - 0.3); seekSoft(cl.start); }
-    else { cl.end = clamp(cl.end + dx * spp, cl.start + 0.3, dur()); seekSoft(cl.end); }
-    showBubble((sd.hit.kind === 'in' ? 'IN ' : 'OUT ') + fmtP(sd.hit.kind === 'in' ? cl.start : cl.end), lv ? PREC[lv].label : '', lv ? '' : '指を上下にずらすと細かく');
+    const cl = sd.hit.cl, isIn = sd.hit.kind === 'in';
+    sd.raw += dx * spp;
+    // fine mode (finger slid down) never snaps, so exact positions stay reachable
+    const sn = lv ? null : nearestSnap(sd.targets, sd.raw, 10 * FS.span / strip.clientWidth);
+    const t = sn ? sn.t : sd.raw;
+    if (isIn) cl.start = clamp(t, 0, cl.end - 0.3); else cl.end = clamp(t, cl.start + 0.3, dur());
+    if (sn && sn !== sd.snap) buzz(8);
+    sd.snap = sn;
+    seekSoft(isIn ? cl.start : cl.end, true);
+    showBubble((isIn ? 'IN ' : 'OUT ') + fmtP(isIn ? cl.start : cl.end), sn ? sn.why + 'に吸着' : (lv ? PREC[lv].label + '（吸着なし）' : ''), sn || lv ? '' : '指を上下にずらすと細かく');
   }
 });
 const endStrip = e => {
@@ -1016,7 +1069,8 @@ function renderLines() {
   L.forEach((ln, i) => {
     if (q && !ln.text.includes(q)) return;
     if (q) hits++;
-    const li = document.createElement('li'); li.className = 'line' + (!q && segStartLine.has(i) ? ' cutline' : '') + (i === S.curLine ? ' now' : ''); li.dataset.i = i;
+    const inClip = S.clips.some(c => ln.s < c.end - 0.2 && ln.e > c.start + 0.2), picked = S.pick && S.pick.a === i;
+    const li = document.createElement('li'); li.className = 'line' + (!q && segStartLine.has(i) ? ' cutline' : '') + (i === S.curLine ? ' now' : '') + (inClip ? ' inclip' : '') + (picked ? ' pick' : ''); li.dataset.i = i;
     const txt = q ? esc(ln.text).split(esc(q)).join(`<mark>${esc(q)}</mark>`) : esc(ln.text);
     li.innerHTML = `<span class="tc">${fmt(ln.s)}</span><span>${txt}</span>`;
     frag.appendChild(li);
@@ -1024,9 +1078,52 @@ function renderLines() {
   ul.appendChild(frag);
   if (q) { $('#lineEmpty').hidden = hits > 0; if (!hits) $('#lineEmpty').textContent = `「${q}」は見つかりませんでした。`; }
   else $('#lineEmpty').textContent = '文字起こしをすると、ここに話した内容が時刻つきで並びます。言葉で検索して、その場面に飛べます。';
-  drawTL();
+  renderPick(); drawTL();
 }
-$('#lineList').addEventListener('click', e => { const li = e.target.closest('li[data-i]'); if (!li) return; const ln = S.tr.lines[+li.dataset.i]; if (ln) { stopSkim(); seek(ln.s); } });
+/* make a clip from sentences: tap the first and the last sentence (or long-press to start) */
+// after a long-press, ignore the click that the same finger produces when it lifts
+let lpFired = false, suppressUntil = 0, lp = null;
+function renderPick() {
+  const n = $('#pickNote'), b = $('#b-pick');
+  $('#lineList').classList.toggle('picking', !!S.pick);
+  b.textContent = S.pick ? 'やめる' : '文章で切り抜く';
+  b.disabled = !S.tr.lines.length;
+  if (!S.pick) { n.hidden = true; return; }
+  n.hidden = false; n.innerHTML = '';
+  const s = document.createElement('span');
+  s.textContent = S.pick.a == null ? '切り抜きの最初の文をタップしてください' : '最後の文をタップすると切り抜きになります（同じ文をもう一度タップすると1文だけ）';
+  const x = document.createElement('button'); x.type = 'button'; x.textContent = '取り消す'; x.onclick = () => { S.pick = null; renderPick(); renderLines(); };
+  n.append(s, x);
+}
+function pickLine(i) {
+  const L = S.tr.lines; if (!L[i]) return;
+  if (!S.pick) S.pick = { a: null };
+  if (S.pick.a == null) { S.pick.a = i; buzz(8); seek(L[i].s); renderPick(); renderLines(); return; }
+  const a = Math.min(S.pick.a, i), b = Math.max(S.pick.a, i);
+  const s = Math.max(0, L[a].s - 0.15), e = Math.min(dur(), L[b].e + 0.15);
+  S.pick = null; renderPick();
+  addClip(s, e); renderLines(); seek(s); buzz(15);
+}
+$('#b-pick').onclick = () => { S.pick = S.pick ? null : { a: null }; renderPick(); renderLines(); };
+$('#lineList').addEventListener('click', e => {
+  if (performance.now() < suppressUntil) return;
+  const li = e.target.closest('li[data-i]'); if (!li) return;
+  const i = +li.dataset.i, ln = S.tr.lines[i]; if (!ln) return;
+  if (S.pick) { pickLine(i); return; }
+  stopSkim(); seek(ln.s);
+});
+$('#lineList').addEventListener('pointerdown', e => {
+  lpFired = false;
+  const li = e.target.closest('li[data-i]'); if (!li) return;
+  clearTimeout(lp?.timer);
+  lp = { x: e.clientX, y: e.clientY, timer: setTimeout(() => { lp = null; lpFired = true; pickLine(+li.dataset.i); }, 500) };
+});
+$('#lineList').addEventListener('pointermove', e => { if (lp && Math.hypot(e.clientX - lp.x, e.clientY - lp.y) > 8) { clearTimeout(lp.timer); lp = null; } });
+for (const ev of ['pointerup', 'pointercancel']) $('#lineList').addEventListener(ev, () => {
+  if (lp) { clearTimeout(lp.timer); lp = null; }
+  if (lpFired) { lpFired = false; suppressUntil = performance.now() + 400; }
+});
+$('#lineList').addEventListener('contextmenu', e => e.preventDefault());
 let qT; $('#q').addEventListener('input', e => { clearTimeout(qT); qT = setTimeout(() => { S.query = e.target.value.trim(); renderLines(); }, 200); });
 
 /* ---------------- clips ---------------- */
@@ -1041,7 +1138,7 @@ function addClip(a, b) {
   afterClips(); toast('切り抜きに追加しました（' + fmt(b - a) + '）');
 }
 function removeClip(id) { S.clips = S.clips.filter(c => c.id !== id); if (S.editId === id) S.editId = null; afterClips(); }
-function afterClips() { saveProject(); renderClips(); renderSegs(); drawTL(); drawStrip(); }
+function afterClips() { saveProject(); renderClips(); renderSegs(); renderLines(); drawStrip(); }
 function renderClips() {
   const ul = $('#clipList'); ul.innerHTML = '';
   const total = S.clips.reduce((a, c) => a + c.end - c.start, 0);
@@ -1135,7 +1232,7 @@ function setStatus(html, prog) {
 async function loadFile(file) {
   stopSkim(); S.aToken++; S.tToken++; ASR.stopReq = true;
   if (S.url) URL.revokeObjectURL(S.url);
-  Object.assign(S, { file, url: URL.createObjectURL(file), feat: null, audio: null, segs: [], curSeg: -1, curLine: -1, pendingIn: null, stopAt: null, thumbs: new Map(), duration: 0, tr: { model: '', lines: [], doneUntil: 0 }, editId: null, shown: null });
+  Object.assign(S, { file, url: URL.createObjectURL(file), feat: null, audio: null, segs: [], curSeg: -1, curLine: -1, pendingIn: null, stopAt: null, thumbs: new Map(), duration: 0, tr: { model: '', lines: [], doneUntil: 0 }, editId: null, shown: null, pick: null });
   FS.cache = new Map(); FS.lockV0 = null; SK.pending = null;
   const saved = loadProject();
   S.clips = (saved?.clips || []).map(c => ({ id: S.nextId++, start: c.start, end: c.end }));
