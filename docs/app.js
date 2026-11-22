@@ -26,6 +26,7 @@ const S = {
   view: { start: 0, span: 0 }, pendingIn: null, curSeg: -1, curLine: -1, skim: null, stopAt: null,
   thumbs: new Map(), aToken: 0, tToken: 0, nextId: 1, analyzing: false, exporting: false,
   tr: { model: '', lines: [], doneUntil: 0 }, query: '',
+  lineClosed: new Set(), segOpen: new Set(),
 };
 
 /* ---------------- toast ---------------- */
@@ -531,11 +532,24 @@ function labelSegs(F, segs) {
     if (li && li.s < s.end) s.snip = li.text;
   });
 }
+function segIndexAt(t) {
+  const n = S.segs.length; if (!n) return -1;
+  const i = S.segs.findIndex(s => t >= s.start && t < s.end);
+  return i >= 0 ? i : (t >= S.segs[n - 1].start ? n - 1 : 0);
+}
+// sentence indices per section
+function linesBySeg() {
+  const g = S.segs.map(() => []);
+  if (g.length) S.tr.lines.forEach((ln, i) => g[segIndexAt(ln.s + 0.3)].push(i));
+  return g;
+}
 function autoGap(dur) { return clamp(Math.round(dur / 12 / 5) * 5, 10, 120); }
 function resegment() {
   if (!S.feat) return;
   applyTranscript();
+  const before = S.segs.length;
   S.segs = segmentize(S.feat, S.gap); S.curSeg = -1;
+  if (S.segs.length !== before) { S.lineClosed.clear(); S.segOpen.clear(); }
   renderSegs(); renderLines(); onTime(); queueThumbs();
   if (!S.analyzing) setStatus(`<span class="pill">${S.segs.length}区間</span><span>${S.feat.textUntil ? '話の内容と音声で区切りました' : '音声だけで区切りました。文字起こしをすると精度が上がります'}</span>`, null);
 }
@@ -1021,9 +1035,12 @@ function renderSegs() {
   $('#nSegs').textContent = S.segs.length;
   $('#segEmpty').hidden = !!S.segs.length;
   $('#segTools').hidden = !S.feat;
-  const frag = document.createDocumentFragment();
+  const frag = document.createDocumentFragment(), byseg = linesBySeg();
   S.segs.forEach((s, i) => {
     const li = document.createElement('li'); li.className = 'seg' + (i === S.curSeg ? ' now' : ''); li.dataset.i = i;
+    const mine = byseg[i] || [], open = S.segOpen.has(i) && mine.length > 0;
+    const textBtn = mine.length ? `<button class="segtext-btn" type="button" data-act="text" aria-expanded="${open}">${open ? '▴ 文字を閉じる' : '▾ 文字を見る'}（${mine.length}文）</button>` : '';
+    const textBox = open ? `<div class="segtext">${mine.map(k => { const l = S.tr.lines[k]; return `<p data-t="${l.s}"><span class="tc">${fmt(l.s)}</span><span>${esc(l.text)}</span></p>`; }).join('')}<div class="segtext-acts"><button type="button" data-act="copy">この区間の文章をコピー</button></div></div>` : '';
     const badges = [];
     if (s.heat >= 0.8 && S.segs.length >= 3) badges.push('<span class="badge heat">盛り上がり</span>');
     if (i > 0 && s.change >= 0.75) badges.push('<span class="badge cut">話題が大きく変化</span>');
@@ -1038,19 +1055,30 @@ function renderSegs() {
         ${s.snip ? `<div class="snip">${esc(s.snip)}</div>` : ''}
         ${badges.length ? `<div class="badges">${badges.join('')}</div>` : ''}
         <div class="meters"><span>熱量</span><span class="meter heat" style="--v:${s.heat.toFixed(2)}"><i></i></span><span>変化</span><span class="meter cut" style="--v:${(i ? s.change : 0).toFixed(2)}"><i></i></span></div>
+        ${textBtn}
       </div>
       <div class="acts">
         <button class="ibtn" type="button" data-act="play" aria-label="この区間を再生">${ICON.play}</button>
         <button class="ibtn ${on ? 'on' : ''}" type="button" data-act="add" aria-label="${on ? '切り抜きから外す' : '切り抜きに追加'}">${on ? ICON.check : ICON.plus}</button>
-      </div>`;
+      </div>
+      ${textBox}`;
     frag.appendChild(li);
   });
   ul.appendChild(frag);
 }
 $('#segList').addEventListener('click', e => {
+  const p = e.target.closest('.segtext p[data-t]'); if (p) { stopSkim(); seek(+p.dataset.t); return; }
   const btn = e.target.closest('button[data-act]'); if (!btn) return;
   const i = +btn.closest('li').dataset.i, s = S.segs[i]; if (!s) return;
   const act = btn.dataset.act;
+  if (act === 'text') { if (S.segOpen.has(i)) S.segOpen.delete(i); else S.segOpen.add(i); renderSegs(); return; }
+  if (act === 'copy') {
+    const text = (linesBySeg()[i] || []).map(k => S.tr.lines[k].text).join('\n');
+    const done = () => toast('区間' + (i + 1) + 'の文章をコピーしました');
+    const fallback = () => { const box = btn.closest('.segtext'); const r = document.createRange(); r.selectNodeContents(box); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); toast('文章を選択しました。長押しでコピーしてください'); };
+    try { navigator.clipboard.writeText(text).then(done, fallback); } catch (_) { fallback(); }
+    return;
+  }
   if (act === 'seek') { stopSkim(); seek(s.start + 0.01); }
   else if (act === 'play') { stopSkim(); S.stopAt = s.end; v.currentTime = s.start + 0.01; v.play().catch(() => {}); }
   else if (act === 'add') { const c = clipFor(s); if (c) removeClip(c.id); else addClip(s.start, s.end); }
@@ -1062,20 +1090,39 @@ function renderLines() {
   $('#nLines').textContent = L.length;
   $('#lineEmpty').hidden = !!L.length;
   ul.innerHTML = '';
-  const starts = new Set(S.segs.slice(1).map(s => s.start));
-  const segStartLine = new Set();
-  for (const st of starts) { const i = L.findIndex(l => l.s >= st - 0.3); if (i >= 0) segStartLine.add(i); }
   const frag = document.createDocumentFragment(); let hits = 0;
-  L.forEach((ln, i) => {
-    if (q && !ln.text.includes(q)) return;
-    if (q) hits++;
-    const inClip = S.clips.some(c => ln.s < c.end - 0.2 && ln.e > c.start + 0.2), picked = S.pick && S.pick.a === i;
-    const li = document.createElement('li'); li.className = 'line' + (!q && segStartLine.has(i) ? ' cutline' : '') + (i === S.curLine ? ' now' : '') + (inClip ? ' inclip' : '') + (picked ? ' pick' : ''); li.dataset.i = i;
-    const txt = q ? esc(ln.text).split(esc(q)).join(`<mark>${esc(q)}</mark>`) : esc(ln.text);
-    li.innerHTML = `<span class="tc">${fmt(ln.s)}</span><span>${txt}</span>`;
-    frag.appendChild(li);
+  // sentences grouped under the section they start in
+  const groups = S.segs.length ? linesBySeg() : [L.map((_, i) => i)];
+  groups.forEach((idx, k) => {
+    const shown = q ? idx.filter(i => L[i].text.includes(q)) : idx;
+    if (!shown.length) return;
+    hits += q ? shown.length : 0;
+    const s = S.segs[k];
+    if (s) {
+      const closed = !q && S.lineClosed.has(k), on = !!clipFor(s);
+      const h = document.createElement('li'); h.className = 'lhead' + (closed ? ' closed' : ''); h.dataset.seg = k;
+      h.innerHTML = `
+        <button class="lhead-main" type="button" data-hact="toggle" aria-expanded="${!closed}">
+          <span class="chev" aria-hidden="true">▾</span>
+          <span class="lhead-txt"><span class="tc">区間${k + 1}・${fmt(s.start)}–${fmt(s.end)}・${idx.length}文</span>${s.label ? `<b>${esc(s.label)}</b>` : ''}</span>
+        </button>
+        <button class="ibtn" type="button" data-hact="play" aria-label="区間${k + 1}を再生">${ICON.play}</button>
+        <button class="ibtn ${on ? 'on' : ''}" type="button" data-hact="add" aria-label="${on ? '切り抜きから外す' : '区間を切り抜きに追加'}">${on ? ICON.check : ICON.plus}</button>`;
+      frag.appendChild(h);
+      if (closed) return;
+    }
+    for (const i of shown) {
+      const ln = L[i];
+      const inClip = S.clips.some(c => ln.s < c.end - 0.2 && ln.e > c.start + 0.2), picked = S.pick && S.pick.a === i;
+      const li = document.createElement('li'); li.className = 'line' + (i === S.curLine ? ' now' : '') + (inClip ? ' inclip' : '') + (picked ? ' pick' : ''); li.dataset.i = i;
+      const txt = q ? esc(ln.text).split(esc(q)).join(`<mark>${esc(q)}</mark>`) : esc(ln.text);
+      li.innerHTML = `<span class="tc">${fmt(ln.s)}</span><span>${txt}</span>`;
+      frag.appendChild(li);
+    }
   });
   ul.appendChild(frag);
+  $('#b-fold').hidden = !L.length || S.segs.length < 2 || !!q;
+  $('#b-fold').textContent = S.lineClosed.size >= S.segs.length ? 'すべて開く' : 'すべて閉じる';
   if (q) { $('#lineEmpty').hidden = hits > 0; if (!hits) $('#lineEmpty').textContent = `「${q}」は見つかりませんでした。`; }
   else $('#lineEmpty').textContent = '文字起こしをすると、ここに話した内容が時刻つきで並びます。言葉で検索して、その場面に飛べます。';
   renderPick(); drawTL();
@@ -1104,9 +1151,22 @@ function pickLine(i) {
   S.pick = null; renderPick();
   addClip(s, e); renderLines(); seek(s); buzz(15);
 }
+$('#b-fold').onclick = () => {
+  if (S.lineClosed.size >= S.segs.length) S.lineClosed.clear(); else S.segs.forEach((_, k) => S.lineClosed.add(k));
+  renderLines();
+};
 $('#b-pick').onclick = () => { S.pick = S.pick ? null : { a: null }; renderPick(); renderLines(); };
 $('#lineList').addEventListener('click', e => {
   if (performance.now() < suppressUntil) return;
+  const hb = e.target.closest('[data-hact]');
+  if (hb) {
+    const k = +hb.closest('li').dataset.seg, s = S.segs[k]; if (!s) return;
+    const a = hb.dataset.hact;
+    if (a === 'toggle') { if (S.lineClosed.has(k)) S.lineClosed.delete(k); else S.lineClosed.add(k); renderLines(); }
+    else if (a === 'play') { stopSkim(); S.stopAt = s.end; v.currentTime = s.start + 0.01; v.play().catch(() => {}); }
+    else if (a === 'add') { const c = clipFor(s); if (c) removeClip(c.id); else addClip(s.start, s.end); }
+    return;
+  }
   const li = e.target.closest('li[data-i]'); if (!li) return;
   const i = +li.dataset.i, ln = S.tr.lines[i]; if (!ln) return;
   if (S.pick) { pickLine(i); return; }
@@ -1232,7 +1292,7 @@ function setStatus(html, prog) {
 async function loadFile(file) {
   stopSkim(); S.aToken++; S.tToken++; ASR.stopReq = true;
   if (S.url) URL.revokeObjectURL(S.url);
-  Object.assign(S, { file, url: URL.createObjectURL(file), feat: null, audio: null, segs: [], curSeg: -1, curLine: -1, pendingIn: null, stopAt: null, thumbs: new Map(), duration: 0, tr: { model: '', lines: [], doneUntil: 0 }, editId: null, shown: null, pick: null });
+  Object.assign(S, { file, url: URL.createObjectURL(file), feat: null, audio: null, segs: [], curSeg: -1, curLine: -1, pendingIn: null, stopAt: null, thumbs: new Map(), duration: 0, tr: { model: '', lines: [], doneUntil: 0 }, editId: null, shown: null, pick: null, lineClosed: new Set(), segOpen: new Set() });
   FS.cache = new Map(); FS.lockV0 = null; SK.pending = null;
   const saved = loadProject();
   S.clips = (saved?.clips || []).map(c => ({ id: S.nextId++, start: c.start, end: c.end }));

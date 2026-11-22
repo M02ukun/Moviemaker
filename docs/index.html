@@ -163,14 +163,29 @@ ol{list-style:none;margin:0;padding:0}
 .clip .selnote{font-size:11px;color:var(--tape)}
 
 /* transcript */
-.search{display:flex;gap:8px;margin-bottom:10px}
-.search input{flex:1;min-width:0;min-height:40px;border-radius:8px;border:1px solid var(--line);background:var(--surface);padding:0 12px}
+.search{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}
+.search input{flex:1 1 180px;min-width:0;min-height:40px;border-radius:8px;border:1px solid var(--line);background:var(--surface);padding:0 12px}
 .lines{display:flex;flex-direction:column}
 .line{display:grid;grid-template-columns:auto 1fr;gap:10px;padding:8px 6px;border-bottom:1px solid var(--line);cursor:pointer;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 .line .tc{font-size:12px;color:var(--dim);padding-top:2px}
 .line.now{background:var(--seg-now)}
 .line.cutline{border-top:2px solid var(--cut)}
 .line.inclip{box-shadow:3px 0 0 var(--tape) inset}
+.lhead{display:flex;align-items:center;gap:6px;padding:8px 0 6px;margin-top:12px;border-top:2px solid var(--cut)}
+.lhead:first-child{margin-top:0}
+.lhead .ibtn{width:36px;height:36px;flex:none}
+.lhead-main{flex:1;min-width:0;display:flex;align-items:flex-start;gap:8px;background:none;border:0;padding:4px 2px;text-align:left}
+.lhead-txt{display:flex;flex-direction:column;gap:2px;min-width:0}
+.lhead-txt .tc{font-size:12px;color:var(--cut)}
+.lhead-txt b{font-size:14px;line-height:1.4;overflow-wrap:anywhere}
+.chev{color:var(--muted);font-size:12px;line-height:20px;transition:transform .15s}
+.lhead.closed .chev{transform:rotate(-90deg)}
+.segtext-btn{align-self:flex-start;margin-top:2px;border:0;background:none;color:var(--cut);font-size:12px;padding:4px 0}
+.segtext{grid-column:1/-1;max-height:45vh;overflow:auto;border-top:1px solid var(--line);padding-top:6px;display:flex;flex-direction:column}
+.segtext p{margin:0;display:grid;grid-template-columns:auto 1fr;gap:8px;padding:5px 2px;font-size:13px;line-height:1.6;cursor:pointer;border-bottom:1px solid var(--line)}
+.segtext p .tc{font-size:11px;color:var(--dim);padding-top:2px}
+.segtext-acts{display:flex;justify-content:flex-end;padding-top:6px}
+.segtext-acts button{border:1px solid var(--line);background:var(--raised);border-radius:6px;font-size:12px;padding:6px 10px}
 .line.pick{background:var(--tape);color:var(--tape-ink)}
 .line.pick .tc{color:var(--tape-ink)}
 .lines.picking .line{cursor:copy}
@@ -306,7 +321,7 @@ ol{list-style:none;margin:0;padding:0}
   </section>
 
   <section id="panel-text" class="panel" role="tabpanel" hidden>
-    <div class="search"><input id="q" type="search" placeholder="言葉で探す（例：京都）" aria-label="文字起こしを検索"><button id="b-pick" class="btn small" type="button">文章で切り抜く</button></div>
+    <div class="search"><input id="q" type="search" placeholder="言葉で探す（例：京都）" aria-label="文字起こしを検索"><button id="b-pick" class="btn small" type="button">文章で切り抜く</button><button id="b-fold" class="btn small ghost" type="button" hidden>すべて閉じる</button></div>
     <div class="picknote" id="pickNote" hidden></div>
     <ol id="lineList" class="lines"></ol>
     <div id="lineEmpty" class="empty">文字起こしをすると、ここに話した内容が時刻つきで並びます。言葉で検索して、その場面に飛べます。</div>
