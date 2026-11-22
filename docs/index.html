@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>きりぬき帳</title>
+<meta name="description" content="長い動画の話題の切れ目を端末内の文字起こしと音声分析で見つけ、好きな区間をつないで書き出す動画編集アプリ">
+<meta name="theme-color" content="#131516">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+JP:wght@400;500;700&display=swap">
+<style>
+/* Layout: phone-first single column. Sticky player, analysis timeline strip, transcription bar, then tabbed lists. Editor-dark by choice so footage reads true. */
+:root{
+  color-scheme: dark;
+  --bg:#131516; --surface:#1b1e20; --raised:#24282b; --line:#33393d;
+  --fg:#eceeed; --muted:#a0a8a5; --dim:#6f7875;
+  --tape:#e7b84a; --tape-ink:#1c1606;
+  --cut:#5fbfcb; --heat:#e5825e; --heat-dim:#9a6450; --wave:#5b6562;
+  --seg-a:#181b1d; --seg-b:#1d2123; --seg-now:#24323a; --danger:#e3665d;
+  --font-ui:"IBM Plex Sans JP", system-ui, "Hiragino Sans", "Noto Sans JP", sans-serif;
+  --font-tc:"IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+  --r:10px;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{background:var(--bg);color:var(--fg);margin:0}
+:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{font-family:var(--font-ui);font-size:15px;line-height:1.55;-webkit-tap-highlight-color:transparent}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:10;background:var(--bg)}
+button,input,label,select{font:inherit;color:inherit}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--tape);outline-offset:2px}
+svg.i{width:20px;height:20px;fill:currentColor;flex:none}
+.tc{font-family:var(--font-tc);font-variant-numeric:tabular-nums;letter-spacing:.01em}
+
+.app{max-width:760px;margin:0 auto;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:0 96px}
+.top{display:flex;align-items:center;justify-content:space-between;gap:12px;padding-block:12px 10px}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:18px;letter-spacing:.02em}
+.brand .mark{width:22px;height:14px;border-radius:2px;background:repeating-linear-gradient(90deg,var(--tape) 0 6px,transparent 6px 8px);box-shadow:0 0 0 1px var(--tape) inset}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:40px;padding:0 14px;border-radius:8px;border:1px solid var(--line);background:var(--raised);font-weight:500;white-space:nowrap;user-select:none}
+.btn.primary{background:var(--tape);color:var(--tape-ink);border-color:var(--tape)}
+.btn.ghost{background:transparent}
+.btn.small{min-height:34px;padding:0 12px;font-size:13px}
+.btn:disabled{opacity:.45;cursor:default}
+
+.stage{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--bg);padding-bottom:8px}
+.screen{position:relative;background:#000;border-radius:var(--r);overflow:hidden;aspect-ratio:16/9;max-height:36vh;width:100%;margin:0 auto}
+.screen video{width:100%;height:100%;display:block;background:#000;object-fit:contain}
+.placeholder{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:16px;text-align:center;color:var(--muted);background:radial-gradient(120% 90% at 50% 0%,#1f2427,#0d0f10)}
+.placeholder strong{color:var(--fg);font-size:16px}
+.caption{position:absolute;left:8px;right:8px;bottom:44px;text-align:center;pointer-events:none}
+.caption span{display:inline-block;background:rgba(0,0,0,.72);color:#fff;font-size:13px;line-height:1.5;padding:2px 8px;border-radius:4px;max-width:100%}
+.transport{display:flex;align-items:center;gap:6px;margin-top:8px;flex-wrap:wrap}
+.transport .tc{flex:1;min-width:0;text-align:center;color:var(--muted);font-size:13px;white-space:nowrap}
+.tbtn{min-height:40px;min-width:48px;padding:0 10px;border-radius:8px;border:1px solid var(--line);background:var(--surface);font-weight:500;font-size:14px}
+.tbtn.inout{font-family:var(--font-tc);font-weight:500;border-color:var(--tape);color:var(--tape);letter-spacing:.06em}
+.tbtn.inout.armed{background:var(--tape);color:var(--tape-ink)}
+.inchip{margin-top:6px;font-size:13px;color:var(--tape);display:flex;gap:8px;align-items:center}
+.inchip button{border:0;background:none;color:var(--muted);text-decoration:underline;padding:4px}
+
+.tl{margin-top:6px}
+.tl-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+.legend{display:flex;gap:12px;font-size:12px;color:var(--muted);align-items:center;flex-wrap:wrap}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+.lg-heat{background:var(--heat)} .lg-cut{background:var(--cut)} .lg-tape{background:var(--tape)}
+.zoom{display:flex;gap:4px}
+.zoom button{min-height:30px;padding:0 10px;border-radius:15px;border:1px solid var(--line);background:transparent;font-size:12px;color:var(--muted)}
+.zoom button[aria-pressed="true"]{background:var(--raised);color:var(--fg);border-color:var(--muted)}
+.tl-wrap{position:relative;border:1px solid var(--line);border-radius:var(--r);background:var(--surface);overflow:hidden}
+#tl{display:block;width:100%;height:128px;touch-action:pan-y}
+.tl-status{padding:2px 10px 8px;font-size:12px;color:var(--muted);display:flex;gap:8px;align-items:center;flex-wrap:wrap;min-height:30px}
+.pill{background:var(--raised);border:1px solid var(--line);border-radius:10px;padding:0 8px;white-space:nowrap}
+.progress{height:3px;background:var(--line)}
+.progress i{display:block;height:100%;width:0;background:var(--cut);transition:width .2s}
+
+/* transcription bar */
+.asr{margin-top:10px;border:1px solid var(--line);border-radius:var(--r);padding:10px;display:flex;flex-direction:column;gap:8px;background:var(--surface)}
+.asr-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.asr-title{font-weight:700;font-size:14px}
+.asr-state{flex:1;min-width:0;font-size:12px;color:var(--muted)}
+.asr select{min-height:34px;border-radius:8px;border:1px solid var(--line);background:var(--raised);padding:0 8px;font-size:13px}
+.asr .note{font-size:12px;color:var(--dim);margin:0}
+.asr .progress{border-radius:2px;overflow:hidden}
+.asr .progress i{background:var(--tape)}
+
+.tabs{display:flex;gap:4px;margin-top:16px;border-bottom:1px solid var(--line)}
+.tab{flex:1;min-height:44px;background:none;border:0;border-bottom:2px solid transparent;color:var(--muted);font-weight:500;margin-bottom:-1px;white-space:nowrap}
+.tab b{font-family:var(--font-tc);font-weight:500;font-size:12px;margin-left:4px;padding:1px 7px;border-radius:9px;background:var(--raised);color:var(--muted)}
+.tab[aria-selected="true"]{color:var(--fg);border-bottom-color:var(--tape)}
+.panel{padding-top:12px}
+
+.seg-tools{display:grid;grid-template-columns:auto 1fr auto;gap:6px 10px;align-items:center;font-size:13px;color:var(--muted);margin-bottom:10px}
+.seg-tools input[type=range]{width:100%;accent-color:var(--cut)}
+.seg-tools .ends{grid-column:2;display:flex;justify-content:space-between;font-size:11px;color:var(--dim);margin-top:-6px}
+.seg-tools .skimrow{grid-column:1/-1;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.seg-tools .skimrow span{font-size:12px;color:var(--dim)}
+
+ol{list-style:none;margin:0;padding:0}
+.segs{display:flex;flex-direction:column;gap:8px}
+.seg{display:grid;grid-template-columns:112px 1fr auto;gap:10px;align-items:center;padding:8px;border-radius:var(--r);background:var(--surface);border:1px solid transparent}
+.seg.now{border-color:var(--cut);background:var(--seg-now)}
+.seg .thumb{position:relative;width:112px;aspect-ratio:16/9;border-radius:6px;overflow:hidden;background:#000;border:0;padding:0}
+.seg .thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.seg .thumb .dur{position:absolute;right:4px;bottom:3px;font-size:11px;background:rgba(0,0,0,.7);color:#fff;padding:0 4px;border-radius:3px}
+.seg .meta{min-width:0;display:flex;flex-direction:column;gap:4px}
+.seg .when{font-size:13px;color:var(--fg)}
+.seg .label{font-weight:700;font-size:14px;line-height:1.4;overflow-wrap:anywhere}
+.seg .snip{font-size:12px;color:var(--muted);line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.badges{display:flex;gap:4px;flex-wrap:wrap}
+.badge{font-size:11px;line-height:18px;padding:0 6px;border-radius:4px;border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+.badge.heat{border-color:var(--heat);color:var(--heat)}
+.badge.cut{border-color:var(--cut);color:var(--cut)}
+.meters{display:grid;grid-template-columns:auto 1fr;gap:2px 6px;align-items:center;font-size:11px;color:var(--dim)}
+.meter{height:4px;border-radius:2px;background:var(--line);overflow:hidden}
+.meter i{display:block;height:100%;width:calc(var(--v)*100%)}
+.meter.heat i{background:var(--heat)} .meter.cut i{background:var(--cut)}
+.acts{display:flex;flex-direction:column;gap:6px}
+.ibtn{width:40px;height:40px;display:inline-flex;align-items:center;justify-content:center;border-radius:8px;border:1px solid var(--line);background:var(--raised);padding:0}
+.ibtn:disabled{opacity:.3;cursor:default}
+.ibtn.on{background:var(--tape);color:var(--tape-ink);border-color:var(--tape)}
+
+.clip-sum{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}
+.clip-sum span{color:var(--muted);font-size:13px}
+.clips{display:flex;flex-direction:column;gap:8px}
+.clip{background:var(--surface);border-radius:var(--r);padding:10px;border-left:4px solid var(--tape);display:flex;flex-direction:column;gap:8px}
+.clip .row1{display:flex;align-items:center;gap:8px}
+.clip .no{font-family:var(--font-tc);font-size:12px;color:var(--tape-ink);background:var(--tape);border-radius:4px;padding:0 6px}
+.clip .range{flex:1;min-width:0;font-size:14px}
+.clip .range small{color:var(--muted);margin-left:6px}
+.clip .row1 .ibtn{width:36px;height:36px}
+.trim{display:grid;grid-template-columns:auto 1fr;gap:6px 8px;align-items:center}
+.trim .lab{font-family:var(--font-tc);font-size:12px;color:var(--tape);width:30px}
+.trim .ctrl{display:flex;gap:4px}
+.trim .ctrl button{flex:1;min-height:34px;border-radius:6px;border:1px solid var(--line);background:var(--raised);font-size:12px;padding:0 4px}
+
+/* transcript */
+.search{display:flex;gap:8px;margin-bottom:10px}
+.search input{flex:1;min-width:0;min-height:40px;border-radius:8px;border:1px solid var(--line);background:var(--surface);padding:0 12px}
+.lines{display:flex;flex-direction:column}
+.line{display:grid;grid-template-columns:auto 1fr;gap:10px;padding:8px 6px;border-bottom:1px solid var(--line);cursor:pointer}
+.line .tc{font-size:12px;color:var(--dim);padding-top:2px}
+.line.now{background:var(--seg-now)}
+.line.cutline{border-top:2px solid var(--cut)}
+.line mark{background:var(--tape);color:var(--tape-ink);border-radius:2px;padding:0 1px}
+
+.empty{color:var(--muted);font-size:14px;padding:18px 4px;line-height:1.7}
+.empty ol{list-style:decimal;padding-left:1.4em;display:flex;flex-direction:column;gap:4px;margin-top:6px}
+
+.sheet{position:fixed;inset:0;z-index:20;background:rgba(5,6,7,.72);display:flex;align-items:flex-end;justify-content:center}
+.sheet .card{width:100%;max-width:560px;background:var(--surface);border-radius:16px 16px 0 0;border:1px solid var(--line);border-bottom:0;padding:18px max(16px,env(safe-area-inset-right,0px)) calc(18px + env(safe-area-inset-bottom,0px)) max(16px,env(safe-area-inset-left,0px));display:flex;flex-direction:column;gap:12px;max-height:92vh;overflow:auto}
+.sheet h2{margin:0;font-size:18px}
+.sheet p{margin:0;color:var(--muted);font-size:13px}
+.opt{display:flex;gap:8px;flex-wrap:wrap}
+.opt label{display:flex;gap:6px;align-items:center;padding:8px 12px;border:1px solid var(--line);border-radius:8px;font-size:14px}
+.opt input{accent-color:var(--tape)}
+.bar{height:8px;background:var(--line);border-radius:4px;overflow:hidden}
+.bar i{display:block;height:100%;width:0;background:var(--tape)}
+.sheet video{width:100%;max-height:40vh;background:#000;border-radius:8px}
+.sheet .row{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}
+
+.toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom,0px));transform:translateX(-50%) translateY(20px);background:var(--raised);border:1px solid var(--line);padding:10px 14px;border-radius:10px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .2s,transform .2s;z-index:30;max-width:calc(100% - 32px)}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.offscreen{position:fixed;left:0;top:0;width:4px;height:4px;opacity:.01;pointer-events:none;z-index:-1}
+
+@media (min-width:700px){
+  .seg{grid-template-columns:160px 1fr auto}
+  .seg .thumb{width:160px}
+  .acts{flex-direction:row}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="brand"><span class="mark" aria-hidden="true"></span>きりぬき帳</div>
+    <label class="btn primary" for="file">動画を開く</label>
+    <input id="file" type="file" accept="video/*,audio/*" hidden>
+  </header>
+
+  <section class="stage" aria-label="プレイヤー">
+    <div class="screen">
+      <video id="v" playsinline controls preload="metadata"></video>
+      <div class="caption" id="cap" hidden><span></span></div>
+      <div class="placeholder" id="ph">
+        <strong>長い動画を開いてください</strong>
+        <span>文字起こしと音声から話題の切れ目を探して、区間に分けます。処理はすべてこの端末の中で行います。</span>
+      </div>
+    </div>
+    <div class="transport">
+      <button id="b-back" class="tbtn" type="button">−10秒</button>
+      <button id="b-fwd" class="tbtn" type="button">＋10秒</button>
+      <span class="tc" id="tc">0:00 / 0:00</span>
+      <button id="b-in" class="tbtn inout" type="button">IN</button>
+      <button id="b-out" class="tbtn inout" type="button">OUT</button>
+    </div>
+    <div id="inchip" class="inchip" hidden></div>
+  </section>
+
+  <section class="tl" aria-label="タイムライン">
+    <div class="tl-head">
+      <div class="legend"><span><i class="lg-heat"></i>熱量</span><span><i class="lg-cut"></i>話題の変化</span><span><i class="lg-tape"></i>切り抜き</span></div>
+      <div class="zoom" id="zoom"></div>
+    </div>
+    <div class="tl-wrap">
+      <canvas id="tl" aria-label="分析のタイムライン。タップでその位置へ移動"></canvas>
+      <div class="tl-status" id="tlStatus"><span class="pill">表示例</span><span>動画を開くと、ここにその動画の分析が出ます</span></div>
+      <div class="progress" id="prog" hidden><i></i></div>
+    </div>
+  </section>
+
+  <section class="asr" id="asr" hidden aria-label="文字起こし">
+    <div class="asr-row">
+      <span class="asr-title">文字起こし</span>
+      <span class="asr-state" id="asrState">まだ行っていません</span>
+    </div>
+    <div class="progress" id="asrProg" hidden><i></i></div>
+    <div class="asr-row">
+      <select id="asrModel" aria-label="文字起こしの精度">
+        <option value="onnx-community/whisper-base">標準（速い・初回 約80MB）</option>
+        <option value="onnx-community/whisper-small">高精度（遅い・初回 約250MB）</option>
+      </select>
+      <button id="asrGo" class="btn primary small" type="button">開始</button>
+    </div>
+    <p class="note" id="asrNote">話の内容で区切れるようになります。途中で止めても、次回は続きから再開します。</p>
+  </section>
+
+  <nav class="tabs" role="tablist">
+    <button id="tab-segs" class="tab" role="tab" aria-selected="true" type="button">区間<b id="nSegs">0</b></button>
+    <button id="tab-text" class="tab" role="tab" aria-selected="false" type="button">文字<b id="nLines">0</b></button>
+    <button id="tab-clips" class="tab" role="tab" aria-selected="false" type="button">切り抜き<b id="nClips">0</b></button>
+  </nav>
+
+  <section id="panel-segs" class="panel" role="tabpanel">
+    <div class="seg-tools" id="segTools" hidden>
+      <label for="gap">区切り</label>
+      <input id="gap" type="range" min="10" max="240" step="5" value="60">
+      <span id="gapv" class="tc">60秒</span>
+      <div class="ends"><span>細かく</span><span>おおまか</span></div>
+      <div class="skimrow">
+        <button id="b-skim" class="btn ghost" type="button">冒頭だけ流し見</button>
+        <span>各区間の頭8秒を順に再生します</span>
+      </div>
+    </div>
+    <ol id="segList" class="segs"></ol>
+    <div id="segEmpty" class="empty">
+      使い方
+      <ol>
+        <li>「動画を開く」で長めの動画を選ぶ</li>
+        <li>音声をすぐに分析して、静かになった所などで仮に区切ります</li>
+        <li>「文字起こし」を開始すると、話の内容が変わった所で区切り直し、各区間に見出しが付きます</li>
+        <li>気になった区間を「＋」で切り抜きに追加し、切り抜きタブで微調整して書き出し</li>
+      </ol>
+    </div>
+  </section>
+
+  <section id="panel-text" class="panel" role="tabpanel" hidden>
+    <div class="search"><input id="q" type="search" placeholder="言葉で探す（例：京都）" aria-label="文字起こしを検索"></div>
+    <ol id="lineList" class="lines"></ol>
+    <div id="lineEmpty" class="empty">文字起こしをすると、ここに話した内容が時刻つきで並びます。言葉で検索して、その場面に飛べます。</div>
+  </section>
+
+  <section id="panel-clips" class="panel" role="tabpanel" hidden>
+    <div class="clip-sum"><span id="clipSum">0本</span><button id="b-export" class="btn primary" type="button" disabled>書き出し</button></div>
+    <ol id="clipList" class="clips"></ol>
+    <div id="clipEmpty" class="empty">区間の「＋」を押すか、再生中に IN → OUT の順に押すと切り抜きを追加できます。</div>
+  </section>
+</div>
+
+<div id="sheet" class="sheet" hidden>
+  <div class="card" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
+    <h2 id="sheetTitle">書き出し</h2>
+    <p id="exInfo"></p>
+    <div class="opt" id="exOpts">
+      <label><input type="radio" name="q" value="720" id="q720" checked>720p（軽い）</label>
+      <label><input type="radio" name="q" value="0" id="qsrc">元の画質</label>
+    </div>
+    <div id="exRun" hidden>
+      <div class="bar"><i id="exBar"></i></div>
+      <p id="exNow" class="tc"></p>
+    </div>
+    <video id="exOut" controls playsinline hidden></video>
+    <p id="exMsg"></p>
+    <div class="row">
+      <button id="exCancel" class="btn ghost" type="button">閉じる</button>
+      <button id="exStart" class="btn primary" type="button">書き出し開始</button>
+      <button id="exShare" class="btn" type="button" hidden>共有</button>
+      <button id="exSave" class="btn primary" type="button" hidden>端末に保存</button>
+    </div>
+  </div>
+</div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<video id="thumbV" class="offscreen" muted playsinline preload="auto" aria-hidden="true"></video>
+<script src="app.js"></script>
+</body>
+</html>
