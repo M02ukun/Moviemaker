@@ -107,6 +107,13 @@ svg.i{width:20px;height:20px;fill:currentColor;flex:none}
 .asr .note{font-size:12px;color:var(--dim);margin:0}
 .asr .progress{border-radius:2px;overflow:hidden}
 .asr .progress i{background:var(--tape)}
+.asr-diag{font-size:12px;color:var(--muted)}
+.asr-diag summary{cursor:pointer;padding:4px 0}
+.asr-diag p{margin:4px 0 8px;line-height:1.6}
+.asr-cpu{display:flex;gap:6px;align-items:center;font-size:13px;color:var(--fg);padding:4px 0}
+.asr-cpu input{accent-color:var(--tape);width:18px;height:18px}
+.asr-diag pre:empty{display:none}
+.asr-diag pre{margin:6px 0 0;max-height:30vh;overflow:auto;white-space:pre-wrap;font-family:var(--font-tc);font-size:11px;line-height:1.5;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px}
 
 .tabs{display:flex;gap:4px;margin-top:16px;border-bottom:1px solid var(--line)}
 .tab{flex:1;min-height:44px;background:none;border:0;border-bottom:2px solid transparent;color:var(--muted);font-weight:500;margin-bottom:-1px;white-space:nowrap}
@@ -289,6 +296,12 @@ ol{list-style:none;margin:0;padding:0}
       <button id="asrGo" class="btn primary small" type="button">開始</button>
     </div>
     <p class="note" id="asrNote">話の内容で区切れるようになります。途中で止めても、次回は続きから再開します。</p>
+    <details class="asr-diag" id="asrDiag" hidden>
+      <summary>詳細（うまくいかないとき）</summary>
+      <p id="asrDiagSum"></p>
+      <label class="asr-cpu"><input type="checkbox" id="asrCpu"> CPUだけで処理する（遅いが確実）</label>
+      <pre id="asrDiagLog"></pre>
+    </details>
   </section>
 
   <nav class="tabs" role="tablist">

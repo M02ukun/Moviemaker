@@ -1370,7 +1370,9 @@ function asrWorker() {
   }
   return ASR.worker;
 }
-function asrLoad(model) { return new Promise((res, rej) => { ASR.loadP = { res, rej }; asrWorker().postMessage({ type: 'load', model }); }); }
+function asrLoad(model, prefer) { return new Promise((res, rej) => { ASR.loadP = { res, rej }; asrWorker().postMessage({ type: 'load', model, prefer: prefer || '' }); }); }
+// some phone GPUs return empty or garbage text from Whisper; once seen, remember to use the CPU
+function asrPrefer() { try { return localStorage.getItem('kirinuki:asrDevice') || ''; } catch (_) { return ''; } }
 function asrRun(audio) { const id = ASR.nextId++; return new Promise((res, rej) => { ASR.pending.set(id, { res, rej }); ASR.worker.postMessage({ type: 'run', id, audio }, [audio.buffer]); }); }
 function setAsrState(text, prog) {
   $('#asrState').textContent = text;
@@ -1383,9 +1385,26 @@ function updateAsrUI() {
   if (ASR.running) { go.textContent = '一時停止'; return; }
   const dur = S.feat ? S.feat.duration : 0, done = S.tr.doneUntil;
   if (!S.tr.lines.length && !done) { go.textContent = '開始'; setAsrState('まだ行っていません'); }
+  else if (done >= dur - 1 && !S.tr.lines.length) { go.textContent = 'やり直す'; setAsrState('完了しましたが、文字を1行も認識できませんでした。下の「詳細」で原因を確認できます'); }
   else if (done >= dur - 1) { go.textContent = 'やり直す'; setAsrState(`完了（${S.tr.lines.length}行）`); }
   else { go.textContent = '続きから'; setAsrState(`${fmt(done)} まで完了（${Math.round(done / dur * 100)}%）`, done / dur); }
+  renderAsrDiag();
 }
+function renderAsrDiag() {
+  const d = S.tr.diag || [], box = $('#asrDiag');
+  $('#asrCpu').checked = asrPrefer() === 'wasm';
+  box.hidden = !d.length && !S.tr.lines.length && !(S.feat && S.tr.doneUntil >= S.feat.duration - 1);
+  const ok = d.filter(x => x.kept > 0).length, silent = d.filter(x => x.rms <= 0.003).length;
+  const dropped = d.filter(x => !x.kept && x.raw && x.rms > 0.003).length, empty = d.filter(x => !x.kept && !x.raw && x.rms > 0.003).length;
+  let why = '';
+  if (d.length && !ok) why = silent === d.length ? '動画から取り出した音声が無音になっています（音声の取り出しに問題があります）。' : empty >= dropped ? '音声はあるのに、認識結果が空でした。下の「CPUだけで処理する」をオンにして、やり直してみてください。' : '認識結果がすべて意味のない文字だったため除外しました。下の「CPUだけで処理する」をオンにして、やり直してみてください。';
+  $('#asrDiagSum').textContent = d.length ? `${why}認識できた ${ok}・空 ${empty}・除外 ${dropped}・無音 ${silent}（全${d.length}か所）` : 'まだ記録がありません。';
+  $('#asrDiagLog').textContent = d.slice(-80).map(x => `${fmt(x.s)}–${fmt(x.e)} ${x.dev === 'webgpu' ? 'GPU' : 'CPU'} 音量${x.rms.toFixed(3)} ${x.kept}行「${x.raw || '（空）'}」`).join('\n');
+}
+$('#asrCpu').addEventListener('change', e => {
+  try { if (e.target.checked) localStorage.setItem('kirinuki:asrDevice', 'wasm'); else localStorage.removeItem('kirinuki:asrDevice'); } catch (_) {}
+  toast(e.target.checked ? '次の文字起こしからCPUだけで処理します' : '次の文字起こしからGPUが使えれば使います');
+});
 function planChunks(F, from) {
   const out = []; let t = from; const dur = F.duration;
   while (t < dur - 0.5) {
@@ -1420,18 +1439,37 @@ async function startAsr() {
   let lastApply = performance.now();
   try {
     setAsrState('文字起こしモデルを準備中…', 0);
-    ASR.device = await asrLoad(model);
+    ASR.device = await asrLoad(model, asrPrefer());
     const plan = planChunks(S.feat, S.tr.doneUntil);
-    const t0 = performance.now(); let audioDone = 0;
-    for (const c of plan) {
+    if (!S.tr.diag) S.tr.diag = [];
+    const t0 = performance.now(); let audioDone = 0, emptyStreak = 0, onCpu = ASR.device !== 'webgpu';
+    for (let ci = 0; ci < plan.length; ci++) {
+      const c = plan[ci];
       if (ASR.stopReq || token !== S.aToken) break;
       let vo = 0, n = 0; for (let b = Math.floor(c.s); b < Math.min(S.feat.nB, Math.ceil(c.e)); b++) { vo += S.feat.voiced[b]; n++; }
       if (n && vo / n >= 0.05) {
         const pcm = await pcm16k(c.s, c.e);
         if (token !== S.aToken) break;
-        const r = await asrRun(pcm);
+        let sq = 0; for (let k = 0; k < pcm.length; k += 4) sq += pcm[k] * pcm[k];
+        const rms = Math.sqrt(sq / Math.max(1, pcm.length / 4)), len = pcm.length / 16000;
+        let r = await asrRun(pcm);
         if (token !== S.aToken) break;
-        addLines(r, c.s, c.e);
+        if (ASR.simEmptyGpu && ASR.device === 'webgpu') r = { text: '', chunks: [] };   // test hook
+        const before = S.tr.lines.length; addLines(r, c.s, c.e); const kept = S.tr.lines.length - before;
+        S.tr.diag.push({ s: c.s, e: c.e, len, rms, raw: String(r.text || '').trim().slice(0, 60), kept, dev: ASR.device });
+        if (S.tr.diag.length > 200) S.tr.diag.shift();
+        renderAsrDiag();
+        // the audio itself was not silent, yet nothing usable came back: count it against the GPU
+        if (kept === 0 && rms > 0.003) emptyStreak++; else if (kept > 0) emptyStreak = 0;
+        if (!onCpu && emptyStreak >= 2) {
+          onCpu = true;
+          setAsrState('GPUで文字を認識できなかったため、CPUに切り替えています…（遅くなります）');
+          ASR.device = await asrLoad(model, 'wasm');
+          try { localStorage.setItem('kirinuki:asrDevice', 'wasm'); } catch (_) {}
+          ci -= emptyStreak; emptyStreak = 0;
+          S.tr.doneUntil = plan[ci + 1].s;
+          continue;   // redo the chunks that came back empty
+        }
       }
       S.tr.doneUntil = c.e; audioDone += c.e - c.s;
       const el = (performance.now() - t0) / 1000, speed = audioDone / el, dur = S.feat.duration;
