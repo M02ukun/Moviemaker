@@ -48,15 +48,34 @@ svg.i{width:20px;height:20px;fill:currentColor;flex:none}
 .btn:disabled{opacity:.45;cursor:default}
 
 .stage{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--bg);padding-bottom:8px}
-.screen{position:relative;background:#000;border-radius:var(--r);overflow:hidden;aspect-ratio:16/9;max-height:36vh;width:100%;margin:0 auto}
+.screen{position:relative;background:#000;border-radius:var(--r);overflow:hidden;aspect-ratio:16/9;max-height:30vh;width:100%;margin:0 auto}
+.screen:fullscreen{max-height:none;border-radius:0;aspect-ratio:auto}
+.gest{position:absolute;inset:0;z-index:2;touch-action:pan-y;user-select:none;-webkit-user-select:none}
+.bubble{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:3;pointer-events:none;background:rgba(0,0,0,.72);color:#fff;border-radius:12px;padding:8px 14px;text-align:center;line-height:1.35;min-width:120px}
+.bubble b{display:block;font-family:var(--font-tc);font-size:20px;font-weight:500}
+.bubble span{display:block;font-family:var(--font-tc);font-size:13px}
+.bubble small{display:block;font-size:11px;color:#c9cfcd;margin-top:2px}
+.tapfx{position:absolute;top:0;bottom:0;width:34%;z-index:2;pointer-events:none;display:flex;align-items:center;justify-content:center;color:#fff;font-family:var(--font-tc);font-size:15px;background:radial-gradient(closest-side,rgba(255,255,255,.18),transparent);opacity:0;transition:opacity .35s}
+.tapfx.l{left:0} .tapfx.r{right:0} .tapfx.show{opacity:1;transition:none}
+.ctrlrow{display:flex;align-items:center;gap:8px;margin-top:8px}
+.ctrlrow .tc{font-size:12px;color:var(--muted);white-space:nowrap}
+.seekbar{position:relative;flex:1;min-width:0;height:36px;touch-action:none;cursor:grab}
+.seekbar .track{position:absolute;left:0;right:0;top:15px;height:6px;border-radius:3px;background:var(--line)}
+.seekbar .fill{position:absolute;left:0;top:15px;height:6px;border-radius:3px;background:var(--tape);width:0}
+.seekbar .knob{position:absolute;top:8px;width:20px;height:20px;margin-left:-10px;border-radius:50%;background:var(--fg);box-shadow:0 0 0 3px var(--bg)}
+.seekbar.drag .knob{transform:scale(1.25)}
+.strip-wrap{position:relative;margin-top:6px;border-radius:8px;overflow:hidden;background:var(--surface);border:1px solid var(--line)}
+#strip{display:block;width:100%;height:84px;touch-action:none}
+.strip-hint{position:absolute;right:4px;bottom:3px;font-size:10px;line-height:14px;color:var(--muted);background:rgba(19,21,22,.75);padding:0 5px;border-radius:4px;pointer-events:none}
 .screen video{width:100%;height:100%;display:block;background:#000;object-fit:contain}
 .placeholder{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:16px;text-align:center;color:var(--muted);background:radial-gradient(120% 90% at 50% 0%,#1f2427,#0d0f10)}
 .placeholder strong{color:var(--fg);font-size:16px}
-.caption{position:absolute;left:8px;right:8px;bottom:44px;text-align:center;pointer-events:none}
+.caption{position:absolute;left:8px;right:8px;bottom:8px;text-align:center;pointer-events:none;z-index:2}
 .caption span{display:inline-block;background:rgba(0,0,0,.72);color:#fff;font-size:13px;line-height:1.5;padding:2px 8px;border-radius:4px;max-width:100%}
 .transport{display:flex;align-items:center;gap:6px;margin-top:8px;flex-wrap:wrap}
 .transport .tc{flex:1;min-width:0;text-align:center;color:var(--muted);font-size:13px;white-space:nowrap}
-.tbtn{min-height:40px;min-width:48px;padding:0 10px;border-radius:8px;border:1px solid var(--line);background:var(--surface);font-weight:500;font-size:14px}
+.tbtn{min-height:40px;min-width:40px;padding:0 6px;border-radius:8px;border:1px solid var(--line);background:var(--surface);font-weight:500;font-size:13px;white-space:nowrap}
+.tbtn.icon{display:inline-flex;align-items:center;justify-content:center;padding:0}
 .tbtn.inout{font-family:var(--font-tc);font-weight:500;border-color:var(--tape);color:var(--tape);letter-spacing:.06em}
 .tbtn.inout.armed{background:var(--tape);color:var(--tape-ink)}
 .inchip{margin-top:6px;font-size:13px;color:var(--tape);display:flex;gap:8px;align-items:center}
@@ -135,7 +154,11 @@ ol{list-style:none;margin:0;padding:0}
 .trim{display:grid;grid-template-columns:auto 1fr;gap:6px 8px;align-items:center}
 .trim .lab{font-family:var(--font-tc);font-size:12px;color:var(--tape);width:30px}
 .trim .ctrl{display:flex;gap:4px}
-.trim .ctrl button{flex:1;min-height:34px;border-radius:6px;border:1px solid var(--line);background:var(--raised);font-size:12px;padding:0 4px}
+.trim .ctrl button{flex:1;min-height:34px;border-radius:6px;border:1px solid var(--line);background:var(--raised);font-size:12px;padding:0 2px;min-width:0}
+.clip.sel{background:var(--seg-now);box-shadow:0 0 0 1px var(--tape) inset}
+.clip .edge{display:flex;gap:6px}
+.clip .edge button{flex:1;min-height:34px;border-radius:6px;border:1px solid var(--line);background:transparent;font-size:12px;color:var(--muted)}
+.clip .selnote{font-size:11px;color:var(--tape)}
 
 /* transcript */
 .search{display:flex;gap:8px;margin-bottom:10px}
@@ -184,18 +207,33 @@ ol{list-style:none;margin:0;padding:0}
 
   <section class="stage" aria-label="プレイヤー">
     <div class="screen">
-      <video id="v" playsinline controls preload="metadata"></video>
+      <video id="v" playsinline preload="metadata"></video>
       <div class="caption" id="cap" hidden><span></span></div>
+      <div class="tapfx l" id="fxL"></div><div class="tapfx r" id="fxR"></div>
+      <div class="gest" id="gest" aria-label="動画。左右になぞると移動、指を下にずらすと細かく、ダブルタップで5秒移動"></div>
+      <div class="bubble" id="bubble" hidden></div>
       <div class="placeholder" id="ph">
         <strong>長い動画を開いてください</strong>
         <span>文字起こしと音声から話題の切れ目を探して、区間に分けます。処理はすべてこの端末の中で行います。</span>
       </div>
     </div>
+    <div class="ctrlrow">
+      <button id="b-play" class="tbtn icon" type="button" aria-label="再生"></button>
+      <div class="seekbar" id="seekbar" role="slider" aria-label="再生位置" tabindex="0"><div class="track"></div><div class="fill"></div><div class="knob"></div></div>
+      <span class="tc" id="tdur">0:00</span>
+      <button id="b-fs" class="tbtn icon" type="button" aria-label="全画面"></button>
+    </div>
+    <div class="strip-wrap">
+      <canvas id="strip" aria-label="コマの帯。左右にドラッグで移動、2本指で拡大縮小"></canvas>
+      <span class="strip-hint" id="stripHint">2本指で拡大</span>
+    </div>
     <div class="transport">
-      <button id="b-back" class="tbtn" type="button">−10秒</button>
-      <button id="b-fwd" class="tbtn" type="button">＋10秒</button>
-      <span class="tc" id="tc">0:00 / 0:00</span>
       <button id="b-in" class="tbtn inout" type="button">IN</button>
+      <button id="b-m1" class="tbtn" type="button" aria-label="1秒戻る">−1秒</button>
+      <button id="b-m01" class="tbtn" type="button" aria-label="0.1秒戻る">−0.1</button>
+      <span class="tc" id="tc">0:00.0</span>
+      <button id="b-p01" class="tbtn" type="button" aria-label="0.1秒進む">+0.1</button>
+      <button id="b-p1" class="tbtn" type="button" aria-label="1秒進む">+1秒</button>
       <button id="b-out" class="tbtn inout" type="button">OUT</button>
     </div>
     <div id="inchip" class="inchip" hidden></div>
