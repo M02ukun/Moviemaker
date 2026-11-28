@@ -121,10 +121,23 @@ svg.i{width:20px;height:20px;fill:currentColor;flex:none}
 .tab[aria-selected="true"]{color:var(--fg);border-bottom-color:var(--tape)}
 .panel{padding-top:12px}
 
-.seg-tools{display:grid;grid-template-columns:auto 1fr auto;gap:6px 10px;align-items:center;font-size:13px;color:var(--muted);margin-bottom:10px}
+.seg-tools{display:flex;flex-direction:column;gap:8px;font-size:13px;color:var(--muted);margin-bottom:10px}
+.seg-tools .moderow{display:flex;align-items:center;gap:10px}
+.seg-mode{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.seg-mode button{min-height:34px;padding:0 14px;border:0;background:transparent;color:var(--muted);font-size:13px}
+.seg-mode button[aria-pressed="true"]{background:var(--cut);color:var(--bg);font-weight:500}
+.seg-tools .gaprow{display:grid;grid-template-columns:auto 1fr auto;gap:2px 10px;align-items:center}
 .seg-tools input[type=range]{width:100%;accent-color:var(--cut)}
-.seg-tools .ends{grid-column:2;display:flex;justify-content:space-between;font-size:11px;color:var(--dim);margin-top:-6px}
-.seg-tools .skimrow{grid-column:1/-1;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.seg-tools .ends{grid-column:2;display:flex;justify-content:space-between;font-size:11px;color:var(--dim)}
+.seg-tools .linenote{margin:0;font-size:12px;color:var(--dim)}
+.seg-tools .skimrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.segs.linemode{gap:6px}
+.segs.linemode .seg{grid-template-columns:88px 1fr auto;padding:6px}
+.segs.linemode .seg .thumb{width:88px}
+.segs.linemode .seg .label{font-weight:500;font-size:14px;line-height:1.5}
+.segs.linemode .meters{display:none}
+.capadj{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);margin:-2px 0 10px}
+.capadj .tc{min-width:58px;text-align:center;color:var(--fg)}
 .seg-tools .skimrow span{font-size:12px;color:var(--dim)}
 
 ol{list-style:none;margin:0;padding:0}
@@ -312,10 +325,20 @@ ol{list-style:none;margin:0;padding:0}
 
   <section id="panel-segs" class="panel" role="tabpanel">
     <div class="seg-tools" id="segTools" hidden>
-      <label for="gap">区切り</label>
-      <input id="gap" type="range" min="10" max="240" step="5" value="60">
-      <span id="gapv" class="tc">60秒</span>
-      <div class="ends"><span>細かく</span><span>おおまか</span></div>
+      <div class="moderow">
+        <span>区切り方</span>
+        <div class="seg-mode" id="segMode" role="group" aria-label="区切り方">
+          <button type="button" data-mode="topic" aria-pressed="true">話題ごと</button>
+          <button type="button" data-mode="line" aria-pressed="false">セリフごと</button>
+        </div>
+      </div>
+      <div class="gaprow" id="gapRow">
+        <label for="gap">細かさ</label>
+        <input id="gap" type="range" min="10" max="240" step="5" value="60">
+        <span id="gapv" class="tc">60秒</span>
+        <div class="ends"><span>細かく</span><span>おおまか</span></div>
+      </div>
+      <p class="linenote" id="lineModeNote" hidden>文字起こし済みの部分は1文ずつ、まだの部分は話の途切れで区切ります。</p>
       <div class="skimrow">
         <button id="b-skim" class="btn ghost" type="button">冒頭だけ流し見</button>
         <span>各区間の頭8秒を順に再生します</span>
@@ -336,6 +359,7 @@ ol{list-style:none;margin:0;padding:0}
   <section id="panel-text" class="panel" role="tabpanel" hidden>
     <div class="search"><input id="q" type="search" placeholder="言葉で探す（例：京都）" aria-label="文字起こしを検索"><button id="b-pick" class="btn small" type="button">文章で切り抜く</button><button id="b-fold" class="btn small ghost" type="button" hidden>すべて閉じる</button></div>
     <div class="picknote" id="pickNote" hidden></div>
+    <div class="capadj"><span>字幕のタイミング</span><button id="capOffM" class="btn small ghost" type="button" aria-label="字幕を0.1秒早く出す">早く</button><span id="capOffV" class="tc">±0.0秒</span><button id="capOffP" class="btn small ghost" type="button" aria-label="字幕を0.1秒遅く出す">遅く</button></div>
     <ol id="lineList" class="lines"></ol>
     <div id="lineEmpty" class="empty">文字起こしをすると、ここに話した内容が時刻つきで並びます。言葉で検索して、その場面に飛べます。</div>
   </section>

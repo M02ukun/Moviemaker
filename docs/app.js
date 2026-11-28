@@ -26,8 +26,9 @@ const S = {
   view: { start: 0, span: 0 }, pendingIn: null, curSeg: -1, curLine: -1, skim: null, stopAt: null,
   thumbs: new Map(), aToken: 0, tToken: 0, nextId: 1, analyzing: false, exporting: false,
   tr: { model: '', lines: [], doneUntil: 0 }, query: '',
-  lineClosed: new Set(), segOpen: new Set(),
+  lineClosed: new Set(), segOpen: new Set(), segMode: 'topic',
 };
+try { if (localStorage.getItem('kirinuki:segMode') === 'line') S.segMode = 'line'; } catch (_) {}
 
 /* ---------------- toast ---------------- */
 let toastT;
@@ -390,7 +391,7 @@ function summarize(ex, knownDur) {
   const nE = Math.ceil(featDur * 4), env = new Float32Array(nE), per = 0.25 / fd;
   for (let i = 0; i < nE; i++) { let m = -200; for (let f = Math.floor(i * per); f < Math.min(nF, Math.floor((i + 1) * per)); f++) if (db[f] > m) m = db[f]; env[i] = clamp((m - lo) / ((hi - lo) || 1), 0, 1); }
   const envFine = new Float32Array(nF); for (let f = 0; f < nF; f++) envFine[f] = clamp((db[f] - lo) / ((hi - lo) || 1), 0, 1);
-  return { duration, nB, ac: ch, change: ch, excite, voiced: vr, env, envFine, fd, pauses, textUntil: 0 };
+  return { duration, nB, ac: ch, change: ch, excite, voiced: vr, env, envFine, fd, vthr: (thr - lo) / ((hi - lo) || 1), pauses, textUntil: 0 };
 }
 
 /* ---------------- transcript → topic changes ---------------- */
@@ -412,9 +413,29 @@ function tokens(text) {
   }
   return out;
 }
+// Whisper's segment times drift by a few hundred ms. Move each sentence's start/end to the nearest
+// real speech onset/offset in the loudness envelope (within ±0.8 s); keeps the raw times in s0/e0.
+function refineTimes() {
+  const F = S.feat, L = S.tr.lines; if (!F || !F.envFine || !L.length) return;
+  const ef = F.envFine, fd = F.fd, n = ef.length, thr = F.vthr || 0.3, run = Math.max(2, Math.round(0.12 / fd));
+  const on = i => i >= 0 && i < n && ef[i] > thr;
+  const onset = i => { for (let k = 1; k <= run; k++) if (on(i - k)) return false; for (let k = 0; k < run; k++) if (!on(i + k)) return false; return true; };
+  const offset = i => { for (let k = 1; k <= run; k++) if (!on(i - k)) return false; for (let k = 0; k < run; k++) if (on(i + k)) return false; return true; };
+  const nearest = (t, test) => { let best = null, bd = 0.8; for (let i = Math.max(0, Math.floor((t - 0.8) / fd)); i <= Math.min(n - 1, Math.ceil((t + 0.8) / fd)); i++) if (test(i)) { const d = Math.abs(i * fd - t); if (d < bd) { bd = d; best = i * fd; } } return best; };
+  let prevS = -1;
+  for (const ln of L) {
+    if (ln.s0 == null) { ln.s0 = ln.s; ln.e0 = ln.e; }
+    const a = nearest(ln.s0, onset), b = nearest(ln.e0, offset);
+    let s = a != null ? a - 0.08 : ln.s0, e = b != null ? b + 0.1 : ln.e0;
+    s = Math.max(s, prevS + 0.1, 0);
+    if (e < s + 0.4) e = Math.max(ln.e0, s + 0.4);
+    ln.s = s; ln.e = e; prevS = s;
+  }
+}
 // Lexical-cohesion topic change (TextTiling over time) mixed with the acoustic score.
 function applyTranscript() {
   const F = S.feat; if (!F) return;
+  refineTimes();
   const lines = S.tr.lines, nB = F.nB;
   if (!lines.length) { F.change = F.ac; F.textUntil = 0; F.words = null; return; }
   const vocab = new Map(), wid = w => { let i = vocab.get(w); if (i === undefined) { i = vocab.size; vocab.set(w, i); } return i; };
@@ -532,6 +553,35 @@ function labelSegs(F, segs) {
     if (li && li.s < s.end) s.snip = li.text;
   });
 }
+// heat / talk for arbitrary sections
+function segStats(F, segs) {
+  for (const s of segs) {
+    let ex = 0, vo = 0, c = 0;
+    for (let k = Math.floor(s.start); k < Math.min(F.excite.length, Math.ceil(s.end)); k++) { ex += F.excite[k]; vo += F.voiced[k]; c++; }
+    s.heatRaw = c ? ex / c : 0; s.talk = c ? vo / c : 0; s.change = s.change || 0;
+  }
+  const hr = rankNorm(Float32Array.from(segs.map(s => s.heatRaw)));
+  segs.forEach((s, i) => { s.heat = segs.length > 1 ? hr[i] : 0.5; });
+  return segs;
+}
+// one section per spoken line: transcript sentences, then pause-separated speech where not transcribed yet
+function segmentByLine(F) {
+  const out = [], cov = F.textUntil || 0;
+  for (const ln of S.tr.lines) out.push({ start: ln.s, end: ln.e, label: ln.text, line: true });
+  if (cov < F.duration - 1) {
+    let t = cov; const runs = [];
+    for (const p of F.pauses) {
+      if (p.e <= cov || p.e - p.s < 0.5) continue;
+      if (p.s > t + 0.3) runs.push({ start: t, end: Math.min(F.duration, p.s + 0.1) });
+      t = Math.max(t, p.e - 0.1);
+    }
+    if (F.duration - t > 0.3) runs.push({ start: t, end: F.duration });
+    for (const r of runs) { const last = out[out.length - 1]; if (r.end - r.start < 1 && last && !last.line && r.start - last.end < 1.5) last.end = r.end; else out.push(r); }
+  }
+  out.sort((a, b) => a.start - b.start);
+  for (let i = 1; i < out.length; i++) if (out[i].start < out[i - 1].end) out[i - 1].end = Math.max(out[i - 1].start + 0.3, out[i].start);
+  return segStats(F, out);
+}
 function segIndexAt(t) {
   const n = S.segs.length; if (!n) return -1;
   const i = S.segs.findIndex(s => t >= s.start && t < s.end);
@@ -548,7 +598,7 @@ function resegment() {
   if (!S.feat) return;
   applyTranscript();
   const before = S.segs.length;
-  S.segs = segmentize(S.feat, S.gap); S.curSeg = -1;
+  S.segs = S.segMode === 'line' ? segmentByLine(S.feat) : segmentize(S.feat, S.gap); S.curSeg = -1;
   if (S.segs.length !== before) { S.lineClosed.clear(); S.segOpen.clear(); }
   renderSegs(); renderLines(); onTime(); queueThumbs();
   if (!S.analyzing) setStatus(`<span class="pill">${S.segs.length}区間</span><span>${S.feat.textUntil ? '話の内容と音声で区切りました' : '音声だけで区切りました。文字起こしをすると精度が上がります'}</span>`, null);
@@ -665,7 +715,24 @@ v.addEventListener('seeked', () => { if (SK.pending != null) { const t = SK.pend
 function seek(t) { SK.pending = null; S.shown = null; v.currentTime = clamp(t, 0, dur()); refreshPlayhead(); }
 function curT() { return S.shown != null ? S.shown : (v.currentTime || 0); }
 function updateTC() { $('#tc').textContent = fmtP(curT()); $('#tdur').textContent = fmt(dur()); }
-function refreshPlayhead() { updateTC(); updateBar(); drawTL(); drawStrip(); }
+function refreshPlayhead() { updateTC(); updateBar(); updateCaption(curT()); drawTL(); drawStrip(); }
+
+/* captions: updated every frame while playing; offset lets the viewer nudge them (e.g. Bluetooth delay) */
+const CAP = { off: 0, last: null };
+try { CAP.off = clamp(+localStorage.getItem('kirinuki:capOffset') || 0, -2, 2); } catch (_) {}
+function updateCaption(t) {
+  const tt = t - CAP.off, li = lineAt(tt), ln = S.tr.lines[li];
+  const text = ln && tt >= ln.s - 0.05 && tt < ln.e + 0.3 ? ln.text : '';
+  if (text !== CAP.last) { CAP.last = text; $('#cap').firstElementChild.textContent = text; $('#cap').hidden = !text; }
+  return li;
+}
+function renderCapOff() { $('#capOffV').textContent = (CAP.off > 0 ? '+' : CAP.off < 0 ? '−' : '±') + Math.abs(CAP.off).toFixed(1) + '秒'; }
+for (const [id, d] of [['#capOffM', -0.1], ['#capOffP', 0.1]]) $(id).onclick = () => {
+  CAP.off = Math.round(clamp(CAP.off + d, -2, 2) * 10) / 10;
+  try { localStorage.setItem('kirinuki:capOffset', String(CAP.off)); } catch (_) {}
+  renderCapOff(); CAP.last = null; updateCaption(curT());
+};
+renderCapOff();
 
 /* play / pause / fullscreen */
 function setPlayIcon() { const b = $('#b-play'); b.innerHTML = v.paused ? ICON.play : ICON.pause; b.setAttribute('aria-label', v.paused ? '再生' : '一時停止'); }
@@ -679,7 +746,7 @@ $('#b-fs').onclick = async () => {
   } catch (_) { toast('全画面にできませんでした'); }
 };
 let playRaf = 0;
-function playLoop() { if (playRaf) return; const step = () => { if (v.paused) { playRaf = 0; return; } if (S.stopAt != null && v.currentTime >= S.stopAt) { const t = S.stopAt; S.stopAt = null; v.pause(); v.currentTime = t; playRaf = 0; refreshPlayhead(); return; } updateTC(); updateBar(); drawStrip(); playRaf = requestAnimationFrame(step); }; playRaf = requestAnimationFrame(step); }
+function playLoop() { if (playRaf) return; const step = () => { if (v.paused) { playRaf = 0; return; } if (S.stopAt != null && v.currentTime >= S.stopAt) { const t = S.stopAt; S.stopAt = null; v.pause(); v.currentTime = t; playRaf = 0; refreshPlayhead(); return; } updateCaption(v.currentTime); updateTC(); updateBar(); drawStrip(); playRaf = requestAnimationFrame(step); }; playRaf = requestAnimationFrame(step); }
 v.addEventListener('play', () => { setPlayIcon(); playLoop(); });
 v.addEventListener('pause', setPlayIcon);
 setPlayIcon();
@@ -1002,9 +1069,7 @@ function onTime() {
     S.curSeg = i; const li = $(`#segList li[data-i="${i}"]`); if (li) li.classList.add('now');
   }
   // caption + transcript highlight
-  const li = lineAt(t), ln = S.tr.lines[li];
-  const cap = $('#cap');
-  if (ln && t < ln.e + 0.6) { cap.hidden = false; cap.firstElementChild.textContent = ln.text; } else cap.hidden = true;
+  const li = updateCaption(t);
   if (li !== S.curLine) {
     const o = $('#lineList li.now'); if (o) o.classList.remove('now');
     S.curLine = li; const n = $(`#lineList li[data-i="${li}"]`); if (n) n.classList.add('now');
@@ -1035,10 +1100,16 @@ function renderSegs() {
   $('#nSegs').textContent = S.segs.length;
   $('#segEmpty').hidden = !!S.segs.length;
   $('#segTools').hidden = !S.feat;
-  const frag = document.createDocumentFragment(), byseg = linesBySeg();
+  const lineMode = S.segMode === 'line';
+  ul.classList.toggle('linemode', lineMode);
+  for (const b of document.querySelectorAll('#segMode button')) b.setAttribute('aria-pressed', String(b.dataset.mode === S.segMode));
+  $('#gapRow').hidden = lineMode; $('#lineModeNote').hidden = !lineMode;
+  wantThumb.clear(); thumbIO.disconnect();
+  const frag = document.createDocumentFragment(), byseg = lineMode ? [] : linesBySeg();
   S.segs.forEach((s, i) => {
     const li = document.createElement('li'); li.className = 'seg' + (i === S.curSeg ? ' now' : ''); li.dataset.i = i;
     const mine = byseg[i] || [], open = S.segOpen.has(i) && mine.length > 0;
+    s.thumbKey = thumbKeyOf(s);
     const textBtn = mine.length ? `<button class="segtext-btn" type="button" data-act="text" aria-expanded="${open}">${open ? '▴ 文字を閉じる' : '▾ 文字を見る'}（${mine.length}文）</button>` : '';
     const textBox = open ? `<div class="segtext">${mine.map(k => { const l = S.tr.lines[k]; return `<p data-t="${l.s}"><span class="tc">${fmt(l.s)}</span><span>${esc(l.text)}</span></p>`; }).join('')}<div class="segtext-acts"><button type="button" data-act="copy">この区間の文章をコピー</button></div></div>` : '';
     const badges = [];
@@ -1065,7 +1136,14 @@ function renderSegs() {
     frag.appendChild(li);
   });
   ul.appendChild(frag);
+  for (const li of ul.children) thumbIO.observe(li);
 }
+$('#segMode').addEventListener('click', e => {
+  const b = e.target.closest('button[data-mode]'); if (!b || b.dataset.mode === S.segMode) return;
+  S.segMode = b.dataset.mode; try { localStorage.setItem('kirinuki:segMode', S.segMode); } catch (_) {}
+  stopSkim(); resegment();
+  if (S.segMode === 'line' && !S.tr.lines.length) toast('文字起こしをすると1文ずつに分かれます。今は話の途切れで区切っています');
+});
 $('#segList').addEventListener('click', e => {
   const p = e.target.closest('.segtext p[data-t]'); if (p) { stopSkim(); seek(+p.dataset.t); return; }
   const btn = e.target.closest('button[data-act]'); if (!btn) return;
@@ -1092,12 +1170,13 @@ function renderLines() {
   ul.innerHTML = '';
   const frag = document.createDocumentFragment(); let hits = 0;
   // sentences grouped under the section they start in
-  const groups = S.segs.length ? linesBySeg() : [L.map((_, i) => i)];
+  const flat = !S.segs.length || S.segMode === 'line';
+  const groups = flat ? [L.map((_, i) => i)] : linesBySeg();
   groups.forEach((idx, k) => {
     const shown = q ? idx.filter(i => L[i].text.includes(q)) : idx;
     if (!shown.length) return;
     hits += q ? shown.length : 0;
-    const s = S.segs[k];
+    const s = flat ? null : S.segs[k];
     if (s) {
       const closed = !q && S.lineClosed.has(k), on = !!clipFor(s);
       const h = document.createElement('li'); h.className = 'lhead' + (closed ? ' closed' : ''); h.dataset.seg = k;
@@ -1121,7 +1200,7 @@ function renderLines() {
     }
   });
   ul.appendChild(frag);
-  $('#b-fold').hidden = !L.length || S.segs.length < 2 || !!q;
+  $('#b-fold').hidden = !L.length || S.segs.length < 2 || !!q || flat;
   $('#b-fold').textContent = S.lineClosed.size >= S.segs.length ? 'すべて開く' : 'すべて閉じる';
   if (q) { $('#lineEmpty').hidden = hits > 0; if (!hits) $('#lineEmpty').textContent = `「${q}」は見つかりませんでした。`; }
   else $('#lineEmpty').textContent = '文字起こしをすると、ここに話した内容が時刻つきで並びます。言葉で検索して、その場面に飛べます。';
@@ -1262,25 +1341,31 @@ $('#gap').addEventListener('input', e => {
   clearTimeout(gapT); gapT = setTimeout(() => { resegment(); saveProject(); }, 120);
 });
 
-/* ---------------- thumbnails ---------------- */
-let thumbTimer;
-function queueThumbs() { clearTimeout(thumbTimer); thumbTimer = setTimeout(genThumbs, 300); }
-async function genThumbs() {
-  const token = ++S.tToken;
-  if (!thumbV.src) return;
-  if (thumbV.readyState < 1) await once(thumbV, 'loadedmetadata', 10000);
-  if (!thumbV.videoWidth) return;
-  for (let i = 0; i < S.segs.length; i++) {
-    if (token !== S.tToken || S.exporting) return;
-    const s = S.segs[i]; const t = Math.min(s.end - 0.2, s.start + Math.min(4, (s.end - s.start) / 3));
-    const key = Math.round(t); s.thumbKey = key;
-    if (!S.thumbs.has(key)) {
-      const c = await grab(t, 224);
-      if (!c || token !== S.tToken) continue;
-      try { S.thumbs.set(key, c.toDataURL('image/jpeg', 0.7)); } catch (_) { continue; }
+/* ---------------- thumbnails: only for cards on (or near) the screen ---------------- */
+const thumbTimeOf = s => Math.max(s.start, Math.min(s.end - 0.2, s.start + Math.min(4, (s.end - s.start) / 3)));
+const thumbKeyOf = s => Math.round(thumbTimeOf(s) * 2) / 2;
+const wantThumb = new Set();
+const thumbIO = new IntersectionObserver(entries => {
+  for (const en of entries) { const i = +en.target.dataset.i; if (en.isIntersecting) wantThumb.add(i); else wantThumb.delete(i); }
+  kickThumbs();
+}, { rootMargin: '600px 0px' });
+let thumbBusy = false;
+function queueThumbs() { for (const li of document.querySelectorAll('#segList li.seg')) thumbIO.observe(li); kickThumbs(); }
+async function kickThumbs() {
+  if (thumbBusy) return; thumbBusy = true;
+  try {
+    while (wantThumb.size && !S.exporting) {
+      const i = wantThumb.values().next().value; wantThumb.delete(i);
+      const s = S.segs[i]; if (!s) continue;
+      const key = thumbKeyOf(s);
+      if (!S.thumbs.has(key)) {
+        const c = await grab(thumbTimeOf(s), 224);
+        if (!c) { if (!thumbV.videoWidth) { wantThumb.clear(); break; } continue; }
+        try { S.thumbs.set(key, c.toDataURL('image/jpeg', 0.7)); } catch (_) { continue; }
+      }
+      const img = $(`#segList li[data-i="${i}"] img`); if (img && S.segs[i] === s) img.src = S.thumbs.get(key);
     }
-    const img = $(`#segList li[data-i="${i}"] img`); if (img) img.src = S.thumbs.get(key);
-  }
+  } finally { thumbBusy = false; }
 }
 
 /* ---------------- open + analyse ---------------- */
@@ -1607,5 +1692,5 @@ $('#exShare').onclick = async () => { if (!lastFile) return; try { await navigat
 
 /* ---------------- boot ---------------- */
 renderSegs(); renderLines(); renderClips(); refreshPlayhead();
-window.__kirinuki = { loadFile, S, ASR, FS, probeMp4, segmentize, applyTranscript, pcm16k, tokens };
+window.__kirinuki = { loadFile, S, ASR, FS, probeMp4, segmentize, applyTranscript, pcm16k, tokens, renderSegs, segStats };
 })();
