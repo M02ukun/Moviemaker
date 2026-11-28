@@ -110,13 +110,32 @@ async function probeMp4(file) {
   const mv = top.find(x => x.type === 'moov'); if (!mv || mv.size > 256 * 2 ** 20) return null;
   const m = await readAt(file, mv.start, mv.size);
   const root = { body: mv.hdr, end: m.length };
+  const mvhd = child(m, root, 'mvhd');
+  const movieTs = mvhd ? u32(m, mvhd.body + (m[mvhd.body] === 1 ? 20 : 12)) || 1000 : 1000;
   const trex = new Map();
   const mvex = child(m, root, 'mvex');
-  if (mvex) for (const c of boxes(m, mvex.body, mvex.end)) if (c.type === 'trex') trex.set(u32(m, c.body + 4), { size: u32(m, c.body + 16) });
+  if (mvex) for (const c of boxes(m, mvex.body, mvex.end)) if (c.type === 'trex') trex.set(u32(m, c.body + 4), { dur: u32(m, c.body + 12), size: u32(m, c.body + 16) });
   for (const trak of boxes(m, root.body, root.end)) {
     if (trak.type !== 'trak') continue;
     const hdlr = path(m, trak, 'mdia', 'hdlr'); if (!hdlr || typ(m, hdlr.body + 8) !== 'soun') continue;
     const tkhd = child(m, trak, 'tkhd'); const trackId = u32(m, tkhd.body + (m[tkhd.body] === 1 ? 20 : 12));
+    const mdhd = path(m, trak, 'mdia', 'mdhd');
+    const ts = mdhd ? u32(m, mdhd.body + (m[mdhd.body] === 1 ? 20 : 12)) || 1 : 1;
+    // edit list: an empty edit delays the whole track (audio that starts N seconds into the video);
+    // media_time skips encoder priming. presentation time = dts / ts + off
+    let off = 0;
+    const elst = path(m, trak, 'edts', 'elst');
+    if (elst) {
+      const ev = m[elst.body], n = u32(m, elst.body + 4); let p = elst.body + 8, pre = 0, found = false;
+      for (let i = 0; i < n; i++) {
+        let d, mt;
+        if (ev === 1) { d = u64(m, p); mt = u32(m, p + 8) === 0xffffffff ? -1 : u64(m, p + 8); p += 20; }
+        else { d = u32(m, p); mt = u32(m, p + 4) | 0; p += 12; }
+        if (mt === -1) { pre += d / movieTs; continue; }
+        off = pre - mt / ts; found = true; break;
+      }
+      if (!found) off = pre;
+    }
     const stbl = path(m, trak, 'mdia', 'minf', 'stbl'); if (!stbl) continue;
     const stsd = child(m, stbl, 'stsd'); if (!stsd) continue;
     const entry = boxes(m, stsd.body + 8, stsd.end).next().value; if (!entry) continue;
@@ -152,11 +171,17 @@ async function probeMp4(file) {
           const first = ent[e][0] - 1, spc = ent[e][1], last = e + 1 < ent.length ? ent[e + 1][0] - 1 : nch;
           for (let c = first; c < last && si < count; c++) { let o = chunkOff[c]; for (let k = 0; k < spc && si < count; k++) { offsets[si] = o; o += sizes[si]; si++; } }
         }
-        samples = { offsets, sizes, count: si };
+        // decode times from stts (sample durations can vary, and there can be gaps)
+        const times = new Float64Array(count), stts = child(m, stbl, 'stts');
+        let k = 0, dts = 0;
+        if (stts) { const ne2 = u32(m, stts.body + 4); for (let e = 0; e < ne2 && k < count; e++) { const q = stts.body + 8 + e * 8, cnt = u32(m, q), delta = u32(m, q + 4); for (let j = 0; j < cnt && k < count; j++) { times[k++] = dts / ts + off; dts += delta; } } }
+        for (; k < count; k++) times[k] = (k ? times[k - 1] + frameLen / rate : off);
+        samples = { offsets, sizes, times, count: si };
       }
     }
     if (!samples || samples.count === 0) {
-      const offs = [], szs = [], def = trex.get(trackId);
+      const offs = [], szs = [], tms = [], def = trex.get(trackId);
+      let dts = 0;   // continues across fragments when a fragment has no tfdt
       for (const bx of top) {
         if (bx.type !== 'moof') continue;
         const b = await readAt(file, bx.start, bx.size);
@@ -166,8 +191,11 @@ async function probeMp4(file) {
           const fl = u32(b, tfhd.body) & 0xffffff; let p = tfhd.body + 4;
           if (u32(b, p) !== trackId) continue; p += 4;
           let base = bx.start; if (fl & 1) { base = u64(b, p); p += 8; }
-          if (fl & 2) p += 4; if (fl & 8) p += 4;
+          if (fl & 2) p += 4;
+          let defDur = def ? def.dur : 0; if (fl & 8) { defDur = u32(b, p); p += 4; }
           let defSize = def ? def.size : 0; if (fl & 0x10) { defSize = u32(b, p); p += 4; }
+          const tfdt = child(b, traf, 'tfdt');
+          if (tfdt) dts = b[tfdt.body] === 1 ? u64(b, tfdt.body + 4) : u32(b, tfdt.body + 4);
           let cursor = base;
           for (const trun of boxes(b, traf.body, traf.end)) {
             if (trun.type !== 'trun') continue;
@@ -176,38 +204,39 @@ async function probeMp4(file) {
             let o = cursor; if (tf & 1) { o = base + (u32(b, q) | 0); q += 4; }
             if (tf & 4) q += 4;
             for (let i = 0; i < n; i++) {
-              if (tf & 0x100) q += 4;
+              let du = defDur; if (tf & 0x100) { du = u32(b, q); q += 4; }
               let sz = defSize; if (tf & 0x200) { sz = u32(b, q); q += 4; }
               if (tf & 0x400) q += 4; if (tf & 0x800) q += 4;
-              offs.push(o); szs.push(sz); o += sz;
+              offs.push(o); szs.push(sz); tms.push(dts / ts + off); o += sz; dts += du || Math.round(frameLen * ts / rate);
             }
             cursor = o;
           }
         }
       }
-      samples = { offsets: Float64Array.from(offs), sizes: Uint32Array.from(szs), count: offs.length };
+      samples = { offsets: Float64Array.from(offs), sizes: Uint32Array.from(szs), times: Float64Array.from(tms), count: offs.length };
     }
     if (!samples.count) return null;
-    return { codec, asc, rate, channels: channels || 2, frameLen, samples };
+    return { codec, asc, rate, channels: channels || 2, frameLen, samples, start: samples.times[0], editOffset: off };
   }
   return null;
 }
 
 /* ---------------- decoding ---------------- */
 function decoderConfig(info) { const cfg = { codec: info.codec, sampleRate: info.rate, numberOfChannels: info.channels }; if (info.asc) cfg.description = info.asc; return cfg; }
-// Feed samples [i0, i1) to a fresh AudioDecoder; onPCM gets mono float32 chunks in order.
+// Feed samples [i0, i1) to a fresh AudioDecoder; onPCM gets mono float32 chunks in order,
+// with the chunk's presentation time in seconds (taken from the file, so gaps and delays are kept).
 async function decodeRange(file, info, i0, i1, onPCM, onProg, isCancelled) {
   let err = null;
   const dec = new AudioDecoder({
     output: ad => {
-      try { const n = ad.numberOfFrames, buf = new Float32Array(n); ad.copyTo(buf, { planeIndex: 0, format: 'f32-planar' }); onPCM(buf, ad.sampleRate); }
+      try { const n = ad.numberOfFrames, buf = new Float32Array(n); ad.copyTo(buf, { planeIndex: 0, format: 'f32-planar' }); onPCM(buf, ad.sampleRate, ad.timestamp / 1e6); }
       catch (e) { err = err || e; } finally { ad.close(); }
     },
     error: e => { err = err || e; },
   });
   dec.configure(decoderConfig(info));
-  const { offsets, sizes } = info.samples;
-  const step = info.frameLen / info.rate * 1e6; let i = i0;
+  const { offsets, sizes, times } = info.samples;
+  let i = i0;
   try {
     while (i < i1) {
       if (isCancelled && isCancelled()) throw new Error('cancel');
@@ -216,7 +245,7 @@ async function decodeRange(file, info, i0, i1, onPCM, onProg, isCancelled) {
       const buf = await readAt(file, s, e - s);
       for (let k = i; k < j; k++) {
         const rel = offsets[k] - s;
-        if (sizes[k] > 0 && rel + sizes[k] <= buf.length) dec.decode(new EncodedAudioChunk({ type: 'key', timestamp: Math.round(k * step), data: buf.subarray(rel, rel + sizes[k]) }));
+        if (sizes[k] > 0 && rel + sizes[k] <= buf.length) dec.decode(new EncodedAudioChunk({ type: 'key', timestamp: Math.round(times[k] * 1e6), data: buf.subarray(rel, rel + sizes[k]) }));
       }
       i = j;
       while (dec.decodeQueueSize > 48 && !err) await sleep0();
@@ -259,13 +288,21 @@ async function resample16k(x, sr) {
 async function pcm16k(t0, t1) {
   const A = S.audio; if (!A) throw new Error('no-audio');
   if (A.kind === 'buf') return resample16k(A.buf.subarray(Math.max(0, Math.floor(t0 * A.sr)), Math.min(A.buf.length, Math.ceil(t1 * A.sr))), A.sr);
-  const info = A.info, fl = info.frameLen / info.rate, n = info.samples.count;
-  const i0 = Math.max(0, Math.floor(t0 / fl) - 1), i1 = Math.min(n, Math.ceil(t1 / fl) + 2);
-  const parts = []; let sr = info.rate, total = 0;
-  await decodeRange(S.file, info, i0, i1, (x, r) => { parts.push(x); sr = r; total += x.length; });
-  const all = new Float32Array(total); let o = 0; for (const p of parts) { all.set(p, o); o += p.length; }
-  const off = Math.max(0, Math.round((t0 - i0 * fl) * sr)), len = Math.round((t1 - t0) * sr);
-  return resample16k(all.subarray(off, Math.min(all.length, off + len)), sr);
+  const info = A.info, T = info.samples.times, n = info.samples.count;
+  const firstAtOrAfter = t => { let lo = 0, hi = n; while (lo < hi) { const mid = (lo + hi) >> 1; if (T[mid] < t) lo = mid + 1; else hi = mid; } return lo; };
+  const i0 = Math.max(0, firstAtOrAfter(t0) - 2), i1 = Math.min(n, firstAtOrAfter(t1) + 2);
+  const parts = []; let sr = info.rate;
+  if (i1 > i0) await decodeRange(S.file, info, i0, i1, (x, r, ts) => { parts.push({ x, ts }); sr = r; });
+  // lay each decoded chunk at its real time; anything without audio (before the track starts, gaps) stays silent
+  const len = Math.max(1, Math.round((t1 - t0) * sr)), out = new Float32Array(len);
+  let seq = i0 < n ? T[i0] : t0;
+  for (const p of parts) {
+    const ts = isFinite(p.ts) ? p.ts : seq;
+    let o = Math.round((ts - t0) * sr), a = 0; if (o < 0) { a = -o; o = 0; }
+    if (a < p.x.length && o < len) out.set(p.x.subarray(a, Math.min(p.x.length, a + len - o)), o);
+    seq = ts + p.x.length / sr;
+  }
+  return resample16k(out, sr);
 }
 
 /* ---------------- acoustic features ---------------- */
@@ -293,7 +330,7 @@ function makeFFT(N) {
 class Extractor {
   constructor() { this.sr = 0; this.N = 512; this.NB = 16; }
   init(sr) {
-    this.sr = sr; this.dec = Math.max(1, Math.floor(sr / 16000)); this.rate = sr / this.dec;
+    this.sr = sr; this.pos = 0; this.dec = Math.max(1, Math.floor(sr / 16000)); this.rate = sr / this.dec;
     const N = this.N; this.buf = new Float32Array(N); this.fill = 0; this.acc = 0; this.accN = 0;
     this.re = new Float32Array(N); this.im = new Float32Array(N); this.fft = makeFFT(N);
     this.win = new Float32Array(N); for (let i = 0; i < N; i++) this.win[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (N - 1));
@@ -307,8 +344,19 @@ class Extractor {
     this.prev = new Float32Array(NB); this.hasPrev = false;
     this.db = new Grow(); this.zcr = new Grow(); this.flux = new Grow(); this.bands = new Grow();
   }
-  push(x, sr) {
+  // t: presentation time of x[0] in seconds (optional). Gaps are filled with silence and overlaps
+  // dropped, so feature frame k always means time k * N / rate on the video's clock.
+  push(x, sr, t) {
     if (!this.sr) this.init(sr);
+    if (t != null && isFinite(t)) {
+      const gap = t - this.pos;
+      if (gap > 0.02) { const z = new Float32Array(16384); let left = Math.round(gap * this.sr); while (left > 0) { const k = Math.min(left, z.length); this.feed(z.subarray(0, k)); left -= k; } }
+      else if (gap < -0.02) { x = x.subarray(Math.min(x.length, Math.round(-gap * this.sr))); }
+    }
+    this.feed(x);
+  }
+  feed(x) {
+    this.pos += x.length / this.sr;
     const d = this.dec, b = this.buf, N = this.N;
     for (let i = 0; i < x.length; i++) {
       this.acc += x[i];
@@ -1397,7 +1445,7 @@ async function analyze(file) {
   const token = S.aToken; S.analyzing = true;
   const t0 = performance.now();
   const ex = new Extractor();
-  const onPCM = (x, sr) => ex.push(x, sr);
+  const onPCM = (x, sr, t) => ex.push(x, sr, t);
   const onProg = p => { if (token === S.aToken) setStatus(`<span class="pill">音声を分析中 ${Math.round(p * 100)}%</span><span>再生しながら待てます</span>`, p); };
   try {
     let done = false;
@@ -1420,7 +1468,7 @@ async function analyze(file) {
     let tr = await IDB.get(trKey(model));
     if (!tr) for (const o of $('#asrModel').options) { if (o.value === model) continue; const t = await IDB.get(trKey(o.value)); if (t) { tr = t; $('#asrModel').value = o.value; break; } }
     if (token !== S.aToken) return;
-    if (tr) S.tr = tr;
+    if (tr) S.tr = migrateTr(tr);
     S.analyzing = false;
     setupZoom(); resegment(); renderClips();
     updateAsrUI();
@@ -1454,6 +1502,20 @@ function asrWorker() {
     ASR.worker.onerror = e => { const err = new Error(e.message || 'worker error'); ASR.loadP?.rej(err); ASR.loadP = null; ASR.pending.forEach(p => p.rej(err)); ASR.pending.clear(); };
   }
   return ASR.worker;
+}
+// transcripts saved before v2 assumed the audio started at 0:00; move them to the track's real start
+function migrateTr(tr) {
+  if (!tr || tr.v2) return tr;
+  if (S.audio && S.audio.kind === 'mp4' && S.feat) {
+    const sh = S.audio.info.start || 0;
+    if (Math.abs(sh) > 0.05) {
+      for (const l of tr.lines) { l.s += sh; l.e += sh; if (l.s0 != null) { l.s0 += sh; l.e0 += sh; } }
+      tr.doneUntil = Math.min(S.feat.duration, tr.doneUntil + sh);
+      toast(`保存済みの文字起こしを${sh.toFixed(1)}秒ずらして音声に合わせました`);
+    }
+  }
+  tr.v2 = true; if (tr.model) IDB.put(trKey(tr.model), tr);
+  return tr;
 }
 function asrLoad(model, prefer) { return new Promise((res, rej) => { ASR.loadP = { res, rej }; asrWorker().postMessage({ type: 'load', model, prefer: prefer || '' }); }); }
 // some phone GPUs return empty or garbage text from Whisper; once seen, remember to use the CPU
@@ -1493,6 +1555,9 @@ $('#asrCpu').addEventListener('change', e => {
 function planChunks(F, from) {
   const out = []; let t = from; const dur = F.duration;
   while (t < dur - 0.5) {
+    // don't hand Whisper a window that opens with a long silence: its timestamps drift when it does
+    const quiet = F.pauses.find(p => p.s <= t + 0.2 && p.e - t >= 1.5);
+    if (quiet) { t = Math.max(t, quiet.e - 0.4); if (t >= dur - 0.5) break; }
     let end = Math.min(dur, t + 28);
     if (end < dur) { let best = null; for (const p of F.pauses) { const c = (p.s + p.e) / 2; if (c > t + 12 && c <= t + 28) best = c; if (p.s > t + 28) break; } if (best) end = best; }
     out.push({ s: t, e: end }); t = end;
@@ -1517,7 +1582,7 @@ async function startAsr() {
   const model = $('#asrModel').value, token = S.aToken;
   if (S.tr.model !== model || S.tr.doneUntil >= S.feat.duration - 1) {
     const prev = S.tr.model === model ? null : await IDB.get(trKey(model));
-    S.tr = prev && prev.doneUntil < S.feat.duration - 1 ? prev : { model, lines: [], doneUntil: 0 };
+    S.tr = prev && prev.doneUntil < S.feat.duration - 1 ? migrateTr(prev) : { model, lines: [], doneUntil: 0, v2: true };
   }
   ASR.running = true; ASR.stopReq = false; ASR.dl = {}; updateAsrUI();
   let wake = null; try { wake = await navigator.wakeLock?.request('screen'); } catch (_) {}
@@ -1575,13 +1640,13 @@ async function startAsr() {
 }
 $('#asrGo').onclick = async () => {
   if (ASR.running) { ASR.stopReq = true; $('#asrGo').textContent = '止めています…'; return; }
-  if (S.feat && S.tr.doneUntil >= S.feat.duration - 1 && S.tr.model === $('#asrModel').value) { S.tr = { model: S.tr.model, lines: [], doneUntil: 0 }; }
+  if (S.feat && S.tr.doneUntil >= S.feat.duration - 1 && S.tr.model === $('#asrModel').value) { S.tr = { model: S.tr.model, lines: [], doneUntil: 0, v2: true }; }
   startAsr();
 };
 $('#asrModel').addEventListener('change', async () => {
   if (!S.feat || ASR.running) return;
   const tr = await IDB.get(trKey($('#asrModel').value));
-  S.tr = tr || { model: $('#asrModel').value, lines: [], doneUntil: 0 };
+  S.tr = tr ? migrateTr(tr) : { model: $('#asrModel').value, lines: [], doneUntil: 0, v2: true };
   resegment(); updateAsrUI();
 });
 
