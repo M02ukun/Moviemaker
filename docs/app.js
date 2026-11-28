@@ -463,22 +463,64 @@ function tokens(text) {
 }
 // Whisper's segment times drift by a few hundred ms. Move each sentence's start/end to the nearest
 // real speech onset/offset in the loudness envelope (within ±0.8 s); keeps the raw times in s0/e0.
+// Whisper sometimes shifts a whole 30-s window by several seconds (typically when the window opens
+// with silence). Sentences from one window share the error, so they are handled as a block: blocks
+// come from the recorded window (ck) or, for older transcripts, are split where neighbouring sentences
+// overlap or leave an unnatural gap. Each block's "speech expected here" pattern is slid over the real
+// voice activity, and the shift is kept only when it is clearly better than leaving it alone.
+function localOffsets(F, L) {
+  const R = 10, ef = F.envFine, fd = F.fd, thr = F.vthr || 0.3, nS = Math.ceil(F.duration * R) + 1;
+  const vad = new Int8Array(nS).fill(-1);
+  for (let k = 0; k < nS; k++) {
+    const i0 = Math.floor(k / R / fd), i1 = Math.min(ef.length, Math.floor((k + 1) / R / fd));
+    let c = 0, m = 0; for (let i = i0; i < i1; i++) { m++; if (ef[i] > thr) c++; }
+    if (m && c * 2 >= m) vad[k] = 1;
+  }
+  const groups = []; let g = [];
+  L.forEach((l, i) => {
+    const p = L[i - 1];
+    const cut = p && (l.ck != null || p.ck != null ? l.ck !== p.ck : (l.s0 - p.e0 < -0.3 || l.s0 - p.e0 > 2.5));
+    if (cut && g.length) { groups.push(g); g = []; }
+    g.push(i);
+  });
+  if (g.length) groups.push(g);
+  const shift = new Array(L.length).fill(0), MAXD = 10 * R;
+  for (const idx of groups) {
+    const first = L[idx[0]], last = L[idx[idx.length - 1]];
+    let speech = 0; for (const i of idx) speech += L[i].e0 - L[i].s0;
+    if (speech < 5) continue;                    // too little to tell where it belongs
+    const a = Math.max(0, Math.floor((first.s0 - 2) * R)), b = Math.min(nS, Math.ceil((last.e0 + 2) * R));
+    const act = new Int8Array(b - a).fill(-1);
+    for (const i of idx) { const l = L[i]; for (let k = Math.round(l.s0 * R); k < Math.round(l.e0 * R); k++) if (k >= a && k < b) act[k - a] = 1; }
+    for (const i of idx) { const l = L[i]; for (let k = Math.round((l.s0 - 0.25) * R); k < Math.round((l.s0 + 0.05) * R); k++) if (k >= a && k < b) act[k - a] = -1; }
+    let best = 0, bestS = -Infinity, zero = 0;
+    for (let D = -MAXD; D <= MAXD; D++) {
+      let s = 0; for (let k = 0; k < act.length; k++) { const j = a + k + D; s += act[k] * (j >= 0 && j < nS ? vad[j] : -1); }
+      s /= act.length; if (D === 0) zero = s;
+      if (s > bestS + 1e-9 || (Math.abs(s - bestS) <= 1e-9 && Math.abs(D) < Math.abs(best))) { bestS = s; best = D; }
+    }
+    if (bestS - zero >= 0.1 && Math.abs(best) >= 5) for (const i of idx) shift[i] = best / R;
+  }
+  return shift;
+}
 function refineTimes() {
   const F = S.feat, L = S.tr.lines; if (!F || !F.envFine || !L.length) return;
+  for (const ln of L) if (ln.s0 == null) { ln.s0 = ln.s; ln.e0 = ln.e; }
+  const shift = localOffsets(F, L);
   const ef = F.envFine, fd = F.fd, n = ef.length, thr = F.vthr || 0.3, run = Math.max(2, Math.round(0.12 / fd));
   const on = i => i >= 0 && i < n && ef[i] > thr;
   const onset = i => { for (let k = 1; k <= run; k++) if (on(i - k)) return false; for (let k = 0; k < run; k++) if (!on(i + k)) return false; return true; };
   const offset = i => { for (let k = 1; k <= run; k++) if (!on(i - k)) return false; for (let k = 0; k < run; k++) if (on(i + k)) return false; return true; };
   const nearest = (t, test) => { let best = null, bd = 0.8; for (let i = Math.max(0, Math.floor((t - 0.8) / fd)); i <= Math.min(n - 1, Math.ceil((t + 0.8) / fd)); i++) if (test(i)) { const d = Math.abs(i * fd - t); if (d < bd) { bd = d; best = i * fd; } } return best; };
   let prevS = -1;
-  for (const ln of L) {
-    if (ln.s0 == null) { ln.s0 = ln.s; ln.e0 = ln.e; }
-    const a = nearest(ln.s0, onset), b = nearest(ln.e0, offset);
-    let s = a != null ? a - 0.08 : ln.s0, e = b != null ? b + 0.1 : ln.e0;
+  L.forEach((ln, i) => {
+    const s1 = ln.s0 + shift[i], e1 = ln.e0 + shift[i];
+    const a = nearest(s1, onset), b = nearest(e1, offset);
+    let s = a != null ? a - 0.08 : s1, e = b != null ? b + 0.1 : e1;
     s = Math.max(s, prevS + 0.1, 0);
-    if (e < s + 0.4) e = Math.max(ln.e0, s + 0.4);
-    ln.s = s; ln.e = e; prevS = s;
-  }
+    if (e < s + 0.4) e = Math.max(e1, s + 0.4);
+    ln.s = s; ln.e = e; ln.shift = shift[i]; prevS = s;
+  });
 }
 // Lexical-cohesion topic change (TextTiling over time) mixed with the acoustic score.
 function applyTranscript() {
@@ -1574,7 +1616,7 @@ function addLines(r, s, e) {
     if (L.slice(-2).some(l => l.text === text)) continue;
     let a = s + (c.s ?? 0), b = c.e != null ? s + c.e : e;
     a = clamp(a, s, e); b = clamp(b, a + 0.3, e + 0.5);
-    L.push({ s: a, e: b, text });
+    L.push({ s: a, e: b, text, ck: Math.round(s * 100) / 100 });   // ck: which Whisper window it came from
   }
 }
 async function startAsr() {
